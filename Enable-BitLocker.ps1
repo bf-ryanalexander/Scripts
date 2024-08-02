@@ -1,16 +1,20 @@
 <#
 	.SYNOPSIS
-    	Enables BitLocker Drive Encryption
+		Enables BitLocker Drive Encryption
 	.DESCRIPTION
-    	Checks to see if the device is utilizing BitLocker Drive Encryption with TPM as the Key Protector Type and saves the recovery key to the specified location
+		Checks to see if the device is utilizing BitLocker Drive Encryption with TPM as the Key Protector Type and saves the recovery key to the specified location
 	.NOTES
+		2024-08-01: V2.2 - Added support for auto-unlocking non-system internal drives
 		2024-07-31: V2.1 - Refactored to support Script Variables and be more efficient with fewer duplicate blocks of code
 		2024-07-29: V2.0 - Fully revised what is classified as "Enabled", added new "Status" checks, better "Bad Scenario" checks
 		2024-07-23: V1.0 - Initial version
 	.FUNCTIONALITY
 		Automates the encryption of managed devices to ensure consistent protection.
+	.LINK
+		https://github.com/bf-ryanalexander/Scripts/blob/main/Enable-BitLocker.ps1
 	.NOTES
 		TODO: Make more friendly for recurring scripts that utilize Custom Fields?
+		TODO: Detect if AD/AAD and backup the key there as well https://github.com/homotechsual/Blog-Scripts/blob/main/Monitoring/DomainJoin.ps1
 #>
 function Search-BitLockerKey { (Get-BitLockerVolume -MountPoint $($ENV:SystemDrive)).KeyProtector }
 function Search-BitLockerVolumeStatus { (Get-BitLockerVolume -MountPoint $ENV:SystemDrive).VolumeStatus }
@@ -33,7 +37,8 @@ function Test-IfSaveLocationSpecified {
 	if ($SaveLocationSpecified -eq $true) {
 		#if both fields aren't specified
 		if ( ($null -eq $env:serverFqdn) -or ($null -eq $env:fileShare) ) {
-			Write-Host ">> A location was specified to save the recovery key, but all server information was not provided.`n>> Try again after the device reboots and finishes the encryption process."
+			Write-Host ">> A location was specified to save the recovery key, but all server information was not provided."
+			Write-Host ">> Try again after the device reboots and finishes the encryption process."
 			return $false 2>&1 >$null
 		} else { return $true }
 	}
@@ -84,15 +89,21 @@ if (Test-BitLockerEnabled) {
 } else {
 	Write-Host "|| Enabling BitLocker Drive Encryption..."
 
-	# Encrypt drives that aren't USB drives
-	Get-Disk | Where-Object {$_.bustype -ne 'USB'} | Get-Partition | Where-Object { $_.DriveLetter } | Select-Object -ExpandProperty DriveLetter | Get-BitLockerVolume | Enable-BitLocker -EncryptionMethod AES256 -RecoveryPasswordProtector -WarningAction SilentlyContinue -ErrorAction SilentlyContinue | Out-Null			
+	# Encrypt system drive
+	Get-BitLockerVolume | Where-Object MountPoint -eq $ENV:SystemDrive | Enable-BitLocker -EncryptionMethod AES256 -RecoveryPasswordProtector -WarningAction SilentlyContinue -ErrorAction SilentlyContinue | Out-Null
+
+	# Encrypt and auto-unlock non-system drives that aren't USB drives
+	Get-Disk | Where-Object {$_.bustype -ne 'USB'} | Get-Partition | Where-Object { $_.DriveLetter } | Where-Object {"$($_.DriveLetter):" -ne $ENV:SystemDrive} | Select-Object -ExpandProperty DriveLetter | ForEach-Object {
+		Get-BitLockerVolume | Where-Object MountPoint -eq "$_`:" | Enable-BitLocker -EncryptionMethod AES256 -RecoveryPasswordProtector -WarningAction SilentlyContinue -ErrorAction SilentlyContinue | Enable-BitLockerAutoUnlock | Out-Null
+	}
 
 	if ($null -ne (Search-BitLockerKey)) {
 		Write-Host "|| - Successfully enabled BitLocker Drive Encryption. Restart to begin the encryption process."
 
 		Search-BitLockerKey
+	} else {
+		Write-Host "|| - Failed to enable BitLocker Drive Encryption"
 	}
-	else { Write-Host "|| - Failed to enable BitLocker Drive Encryption" }
 
 	if ((Test-IfSaveLocationSpecified) -eq $true) {
 		Test-IfKeySavedToServer 2>&1 >$null
