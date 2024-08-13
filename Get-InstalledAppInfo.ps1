@@ -9,11 +9,12 @@
 	.FUNCTIONALITY
 		Helps find stubborn-to-uninstall applications and easier access to UninstallStrings
 	.LINK
-		https://github.com/bf-ryanalexander/Scripts/blob/main/Enable-BitLocker.ps1
+		https://github.com/bf-ryanalexander/Scripts/blob/main/Get-InstalledAppInfo.ps1
 #>
+$env:applicationName = "Chrome"
 Write-Host "Searching for $env:applicationName..."
 
-$Paths = @()
+$Paths = [System.Collections.Generic.List[object]]::New()
 
 $MachinePaths = @{
 	"HKLM:\SOFTWARE\Classes\Installer\Products" = "ProductName"
@@ -29,7 +30,7 @@ foreach ($MachinePath in $MachinePaths.keys) {
 	$path | Add-Member -type NoteProperty -Name 'Property' -Value $MachinePaths.$MachinePath
 	$path | Add-Member -type NoteProperty -Name 'Location' -Value "Machine-Wide Install"
 
-	$Paths += $path
+	$Paths.Add($path)
 }
 
 # Collect per-user installer/uninstaller locations
@@ -41,14 +42,14 @@ foreach ($sid in $sids) {
 	$path | Add-Member -type NoteProperty -Name 'Property' -Value "DisplayName"
 	$path | Add-Member -type NoteProperty -Name 'Location' -Value "Per-User Install"
 
-	$Paths += $path
+	$Paths.Add($path)
 	
 	$path = New-Object PSObject
 	$path | Add-Member -type NoteProperty -Name 'Path' -Value "Registry::HKEY_USERS\$sid\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall"
 	$path | Add-Member -type NoteProperty -Name 'Property' -Value "DisplayName"
 	$path | Add-Member -type NoteProperty -Name 'Location' -Value "Per-User Install"
 
-	$Paths += $path
+	$Paths.Add($path)
 }
 
 $Paths | ForEach-Object {
