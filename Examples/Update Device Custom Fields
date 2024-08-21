@@ -1,0 +1,38 @@
+Add-Type -AssemblyName System.Web
+$AdminPassword = [System.Web.Security.Membership]::GeneratePassword(8, 1)
+
+# Credentials & Scoping
+$headers=@{ "Content-Type" = "application/x-www-form-urlencoded" }
+$body=@{
+	grant_type='client_credentials'
+	client_id='YourID'
+	client_secret='YourSecret'
+	scope='monitoring management control'
+}
+
+# Connect to API
+try { $token = ((Invoke-WebRequest -UseBasicParsing -Uri 'https://app.ninjarmm.com/ws/oauth/token' -Method POST -Headers $headers -Body $body).Content | ConvertFrom-Json).access_token ; throw }
+catch {
+	if ($_ -Like '*"resultCode": "FAILURE"*') { Write-Host "Failed to connect to NinjaOne API." }
+	else {
+		Write-Host "|| Updating Domain Admin Password custom fields..."
+		$headers=@{ "Content-Type" = "application/json" ; "Accept" = "*/*" ; "Authorization" = "Bearer $token"}
+		$response = Invoke-WebRequest -UseBasicParsing -Uri "https://app.ninjarmm.com/v2/organization/$env:NINJA_ORGANIZATION_ID/custom-fields" -Method PATCH -Headers $headers -ContentType 'application/json' -Body "{
+			""domainAdminPassword"": ""$AdminPassword"",
+			""domainAdminPasswordLastUpdate"": ""$(Get-Date -Format f)""
+		}"
+		if (($response).StatusCode -eq 204) { Write-Host "|| - Successfully updated organization custom field." }
+
+		$headers=@{ "Accept" = "application/json" ;  "Authorization" = "Bearer $token"}
+		$devices = (Invoke-WebRequest -UseBasicParsing -Uri "https://app.ninjarmm.com/v2/organization/$env:NINJA_ORGANIZATION_ID/devices" -Method GET -Headers $headers).Content | ConvertFrom-Json
+		$counter = 0
+		foreach ($device in $devices) {
+			$response = Invoke-WebRequest -UseBasicParsing -Uri "https://app.ninjarmm.com/v2/device/$($device.id)/custom-fields" -Method PATCH -Headers $headers -ContentType 'application/json' -Body "{
+				""domainAdminPassword"": ""$AdminPassword"",
+				""domainAdminPasswordLastUpdate"": ""$(Get-Date -Format f)""
+			}"
+			if (($response).StatusCode -eq 204) { $counter++ }
+		}
+		if ($counter -gt 0) { Write-Host "|| - Successfully updated $counter devices' custom fields." }
+	}
+}
