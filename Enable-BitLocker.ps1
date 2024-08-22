@@ -16,13 +16,14 @@
 		https://github.com/bf-ryanalexander/Scripts/blob/main/Enable-BitLocker.ps1
 	.NOTES
 		TODO: Detect if Entra and backup the key there as well https://github.com/homotechsual/Blog-Scripts/blob/main/Monitoring/DomainJoin.ps1
-		TODO: Update Test-BitLockerEnabled function to check all internal drives, not just system drive
+		TODO: Update Test-BitLockerEnabled function to check all internal drives, not just system drive 
+				foreach internal drive -eq [Microsoft.BitLocker.Structures.BitLockerVolumeStatus]::FullyEncrypted?
 #>
 function Search-BitLockerKey { (Get-BitLockerVolume).KeyProtector }
-function Search-BitLockerVolumeStatus { (Get-BitLockerVolume -MountPoint $ENV:SystemDrive).VolumeStatus }
+function Search-BitLockerVolumeStatus { (Get-BitLockerVolume).VolumeStatus }
 function Test-BitLockerEnabled { @(
 	# Drive is encrypted, a recovery key exists, uses TPM, and protection is enabled
-	((Search-BitLockerVolumeStatus) -eq "FullyEncrypted") -and
+	((Search-BitLockerVolumeStatus | Get-Unique | Out-String).Trim() -eq "FullyEncrypted") -and
 	($null -ne (Search-BitLockerKey)) -and
 	((Get-BitLockerVolume).KeyProtector -like "*Tpm*") -and
 	((Get-BitLockerVolume).ProtectionStatus -eq "On")
@@ -128,6 +129,8 @@ function Test-IfKeySavedToAD {
 					} catch {
 						if ($BackupError.Exception.Message -notlike "*The key protector specified cannot be used for this operation*") {
 							Write-Host "|| - Successfully backed up BitLocker to Active Directory."
+
+							Ninja-Property-Set BitLockerSavedToAD 1
 						}
 					}
 				}
