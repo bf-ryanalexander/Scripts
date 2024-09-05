@@ -11,7 +11,6 @@
 	.LINK
 		https://github.com/bf-ryanalexander/Scripts/blob/main/Get-InstalledAppInfo.ps1
 #>
-$env:applicationName = "Chrome"
 Write-Host "Searching for $env:applicationName..."
 
 $Paths = [System.Collections.Generic.List[object]]::New()
