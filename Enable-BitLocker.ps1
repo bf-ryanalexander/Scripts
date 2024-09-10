@@ -201,10 +201,10 @@ if (Test-BitLockerEnabled) {
 	Test-BitLockerBackups
 } elseif ( (Search-BitLockerVolumeStatus) -eq "DecryptionInProgress" ) {
 	Write-Host "BitLocker is decrypting the drive to be reconfigured."
-} elseif ( (Get-CimInstance -ClassName Win32_EncryptableVolume  -Namespace "Root\CIMV2\Security\MicrosoftVolumeEncryption").IsVolumeInitializedForProtection -eq $True ) {
-	Write-Host "BitLocker is pending reboot to begin encrypting."
 } elseif ( (Search-BitLockerVolumeStatus) -eq "EncryptionInProgress" ) {
 	Write-Host "BitLocker is encrypting the drive."
+} elseif ( (Get-CimInstance -ClassName Win32_EncryptableVolume  -Namespace "Root\CIMV2\Security\MicrosoftVolumeEncryption").IsVolumeInitializedForProtection -eq $True ) {
+	Write-Host "BitLocker is pending reboot to begin encrypting."
 } elseif ( ( ($null -ne (Search-BitLockerKey)) -and ($null -eq (Search-BitLockerKey | Where-Object KeyProtectorType -eq Tpm)) ) -or #Bad Scenario #1: Key exists, but not setup to use TPM
 	( ($null -eq (Search-BitLockerKey)) -and ((Search-BitLockerVolumeStatus) -eq "FullyEncrypted") ) -or 							#Bad Scenario #2: Key does not exist, but drive is encrypted
 	( ((Search-BitLockerVolumeStatus) -eq "FullyEncrypted") -and ((Get-BitLockerVolume).ProtectionStatus -eq "Off") ) -or 			#Bad Scenario #3: Drive is encrypted but protection is off
