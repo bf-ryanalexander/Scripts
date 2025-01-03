@@ -3,7 +3,7 @@
   DESCRIPTION:  Uses the Advanced IP Scan console utility to scan the network and save the results.
   EXPLANATION:  Checks if AIP is already downloaded,
                 If no, downloads and extracts the portable Advanced IP Scan application
-                  Uses a Ninja Parameter to pass a range specified when running the script
+                  Uses a Ninja Parameter to pass a range specified when running the script, or scans the current network scope if one isn't specified
                   Saves the results of the scan to C:\temp\BrightFlow\AdvancedIPScanner\_aipresults.txt
                   Outputs the results of the scan to the Ninja Activity log
                 If yes, runs the executable as described above
