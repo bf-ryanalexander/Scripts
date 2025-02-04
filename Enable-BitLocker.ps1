@@ -4,6 +4,7 @@
 	.DESCRIPTION
 		Checks to see if the device is utilizing BitLocker Drive Encryption with TPM as the Key Protector Type and saves the recovery key to the specified location
 	.NOTES
+ 		2025-02-04: V2.5 - Fixed issue with Test-BitLockerEnabled function breaking when used with Ninja due to the # symbol not commenting out the line
 		2024-08-22: V2.4 - Added backing up all keys to On-Prem AD
 		2024-08-21: V2.3 - Added backing up all keys to Ninja Multi-Line Custom Field "bitlockerKeys", now supports running as a recurring script with all checks
 		2024-08-01: V2.2 - Added support for auto-unlocking non-system internal drives
@@ -19,11 +20,13 @@
 		TODO: Update Test-BitLockerEnabled function to check all internal drives, not just system drive 
 				foreach internal drive -eq [Microsoft.BitLocker.Structures.BitLockerVolumeStatus]::FullyEncrypted?
 #>
+function Search-BitLockerKey { (Get-BitLockerVolume -MountPoint $($ENV:SystemDrive)).KeyProtector }
 function Search-BitLockerKey { (Get-BitLockerVolume).KeyProtector }
-function Search-BitLockerVolumeStatus { (Get-BitLockerVolume).VolumeStatus }
-function Test-BitLockerEnabled { @(
-	# Drive is encrypted, a recovery key exists, uses TPM, and protection is enabled
-	((Search-BitLockerVolumeStatus | Get-Unique | Out-String).Trim() -eq "FullyEncrypted") -and
+function Search-BitLockerVolumeStatus { (Get-BitLockerVolume -MountPoint $ENV:SystemDrive).VolumeStatus }
+function Search-BitLockerTypeIsTpm { (Get-BitLockerVolume).KeyProtector | Where-Object KeyProtectorType -eq Tpm }
+function Test-BitLockerEnabled { # Drive is encrypted, a recovery key exists, uses TPM, and protection is enabled
+@(
+	((Search-BitLockerVolumeStatus) -eq "FullyEncrypted") -and
 	($null -ne (Search-BitLockerKey)) -and
 	((Get-BitLockerVolume).KeyProtector -like "*Tpm*") -and
 	((Get-BitLockerVolume).ProtectionStatus -eq "On")
