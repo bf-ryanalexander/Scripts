@@ -1,0 +1,267 @@
+<#
+	.SYNOPSIS
+		Adds an alias and/or updates the primary username
+	.DESCRIPTION
+		Updates all domain account UPNs and SPMT addresses from the specified "Old Domains" to the specified "New Domain" and adds the old UPN as an alias (spmt address)
+	.NOTES
+		2025-02-11: V1.0 - Initial version
+	.FUNCTIONALITY
+		Automates the process to change the user's primary domain name in AD (and Entra ID in an AD-synced environment).
+	.LINK
+		https://github.com/bf-ryanalexander/Scripts/blob/main/Update-ADUserAliasAndUPN.ps1
+	.NOTES
+		TODO: Add $Users_To_Exclude and $SecurityGroups_To_Exclude
+		TODO: Update $Exclusions.Add() to use `New-Object PSObject | Add-Member -type NoteProperty` for consistent array additions
+			This will fix CSV export of excluded accounts; exports blank data which triggers an error in the export. Silenced with "-erroraction silentlycontinue" for now
+		TODO: Update CSV export of affected accounts to include UPN before and after change
+		TODO: Update CSV export of excluded accounts to include the reason they were excluded; duplicate post-change, OU exclusion, etc.
+#>
+
+<#
+	CUSTOMIZABLE OPTION EXPLANATIONS
+
+	$AddAlias:
+		When selected, this option just adds the domain specified in $NewDomain as an alias, nothing else.
+		0 for no, 1 for yes
+
+	$ChangePrimaryDomain
+		When selected, this option will check if an alias exists that matches $NewDomain, create it if not, then switches the current primary UPN with the alias.
+		It is not necessary to select $AddAlias if you use this option.
+		0 for no, 1 for yes
+
+	$NewDomain
+		What to change the UserPrincipalName, Email, and ProxyAddresses attributes to
+		Example: "NewDomain.com"
+
+	$DomainsToUpdate
+		Specifies the domain(s) to change to $NewDomain
+		Example: "OldDomain1.com", "OldDomain2.com"
+
+	$LogPath
+		Where to save the result of this change. Saves a timestamped folder so each run's logs are kept neat and orderly; I like putting the stage in the name (PreCheck, TestBatch, FullDeployment)
+		Example: "C:\temp\logs"
+
+	$LogName
+		What to call the log file that shows all the actions taken in the script
+		Don't enter a file extension, a .log and .csv file will be generated with this name
+		Example: "UsernameChange"
+
+	$TestQuantity (optional)
+		Enter the number of accounts you want to test the change with; if you enter 20, it will affect the first 20 accounts that match the criteria
+		Example: 5
+
+	$ExportAffectedAccountsToCSV (optional)
+		If you want to export the list of accounts that will be affected by the requested change to CSV. Exports to $LogPath as "AffectedAccounts.csv"
+		0 for no, 1 for yes
+
+	$ExportExcludedAccountsToCSV (optional)
+		If you want to export the list of accounts that were excluded from the requested change to CSV. Exports to $LogPath as "ExcludedAccounts.csv"
+		0 for no, 1 for yes
+
+	$OU_DNs_To_Exclude (optional)
+		Excludes an Organizational Unit from this change; useful if you have a Department you don't want to update yet or can be left blank
+		Example: "OU=Finance,OU=Domain Users,DC=domain,DC=local", "OU=HR,OU=Domain Users,DC=domain,DC=local"
+
+	$Domains_To_Exclude (optional)
+		Excludes a domain from this change; recommended to leave $NewDomain in the list to avoid any weird issues, haven't tested without it there
+		Example: $NewDomain, "DefaultDomain.local", "SisterCompany.com"
+#>
+
+# Required
+$AddAlias = 0
+$ChangePrimaryDomain = 1
+$NewDomain = "newdomain.com"
+$DomainsToUpdate = @(
+	"OldDomain1.com",
+	"OldDomain2.com"
+)
+$LogPath = "C:\temp\logs\$(Get-Date -Format "yyyy-MM-dd_HH-mm-ss")_PreCheck"
+$LogName = "1_ScriptLog.log"
+
+# Optional
+$TestQuantity = 0
+$ExportAffectedAccountsToCSV = 1
+$ExportExcludedAccountsToCSV = 1
+$OU_DNs_To_Exclude = @(
+	"OU=Finance,OU=Domain Users,DC=domain,DC=local",
+	"OU=HR,OU=Domain Users,DC=domain,DC=local"
+)
+$Domains_To_Exclude = @(
+	$NewDomain,
+	"DefaultDomain.local"
+)
+
+# -------------------- # No changes needed past this line # -------------------- #
+
+if (!(Test-Path $LogPath)) { New-Item -ItemType Directory $LogPath | Out-Null }
+
+function Write-Log {
+    param( [String]$LogMsg ) ; $Log = "[$(Get-Date -Format s)] $LogMsg"
+	Write-Host $Log ; $Log | Out-File -FilePath "$LogPath\$LogName" -Append
+} ; Write-Log "" ; Write-Log "" ; Write-Log " Starting automation..." ; Write-Log "" ; Write-Log ""
+function Search-ADDomains { Get-ADForest | Select-Object -ExpandProperty UPNSuffixes }
+
+if ($NewDomain -notin (Search-ADDomains)) {
+	Write-Log "|| Adding ""$NewDomain"" as a UPN Suffix to Active Directory..."
+
+	Get-ADForest | Set-ADForest -UPNSuffixes @{add=$NewDomain}
+
+	if ($NewDomain -in (Search-ADDomains)) { Write-Log "|| - Successfully added the domain as a UPN Suffix." }
+	else { Write-Log ">> - Failed to add the domain as a UPN Suffix." }
+}
+
+$Exclusions = [System.Collections.Generic.List[PSObject]]::new()
+
+#region Exclusions
+# Disabled accounts to exclude
+Write-Log "|| Excluding Disabled Accounts..."
+
+$DisabledAccounts = [System.Collections.Generic.List[PSObject]]::new()
+Get-ADUser -Filter * -Properties Enabled | Where-Object Enabled -eq $false | Select-Object Name,SamAccountName,UserPrincipalName,Enabled | ForEach-Object {
+	$DisabledAccounts.Add($_) | Out-Null
+	$Exclusions.Add($_) | Out-Null
+} ; Write-Log "|| - Excluded $(($DisabledAccounts | Measure-Object).count) disabled accounts."
+
+# Duplicate accounts to exclude
+Write-Log "|| Excluding Duplicate Accounts..."
+
+$DuplicateAccounts = [System.Collections.Generic.List[PSObject]]::new()
+Get-ADUser -Filter * | Select-Object -ExpandProperty UserPrincipalName | Sort-Object | ForEach-Object { $_.split("@")[0] } | Group-Object | Where-Object Count -gt 1 | ForEach-Object {
+	$duplicate = (Get-ADUser -Filter * -Properties Enabled | Where-Object UserPrincipalName -like ($_.Name + "@*") | Where-Object Enabled -eq $true | Select-Object Name,SamAccountName,UserPrincipalName,Enabled)
+	$DuplicateAccounts.Add($duplicate) | Out-Null
+	$Exclusions.Add($duplicate) | Out-Null
+} ; Write-Log "|| - Excluded $(($DuplicateAccounts | Measure-Object).count) duplicate accounts."
+
+# Mismatched UPN/SMTP accounts to exclude
+Write-Log "|| Excluding Mismatched UPN/SMTP Accounts..."
+
+$MismatchedAccounts = [System.Collections.Generic.List[PSObject]]::new()
+Get-ADUser -Filter * -Properties ProxyAddresses | Select-Object Name,SamAccountName,UserPrincipalName,ProxyAddresses | ForEach-Object {
+    $ProxyAddresses = $_ | Select-Object -ExpandProperty ProxyAddresses
+
+    foreach ($proxy in $ProxyAddresses) {
+        $prefix = ($proxy -split ":")[0] ; $email = ($proxy -split ":")[1] 
+        if (($ProxyAddresses -clike "*SMTP:*") -and (($prefix -ceq "SMTP") -and ($email -ne $_.UserPrincipalName))) {
+			$MismatchedAccounts.Add($_) | Out-Null
+			$Exclusions.Add($_) | Out-Null
+        }
+    }
+} ; Write-Log "|| - Excluded $(($MismatchedAccounts | Measure-Object).count) mismatched accounts."
+
+
+# OUs to exclude
+if (!([string]::IsNullOrWhitespace($OU_DNs_To_Exclude))) {
+	Write-Log "|| Excluding $(($OU_DNs_To_Exclude | Measure-Object).count) Organizational Unit(s)..."
+
+	$ExcludedOU_Accounts = [System.Collections.Generic.List[PSObject]]::new()
+	Get-ADUser -filter * | Select-Object Name,SamAccountName,UserPrincipalName,Enabled,DistinguishedName | ForEach-Object {
+		foreach ($OU in $OU_DNs_To_Exclude) {
+			if ($_.DistinguishedName -eq (($_.DistinguishedName -split ",")[0] + "," + $OU)) {
+				$ExcludedOU_Accounts.Add($_) | Out-Null
+				$Exclusions.Add($_) | Out-Null
+			}
+		}
+	} ; Write-Log "|| - Excluded $(($ExcludedOU_Accounts | Measure-Object).count) accounts in excluded OUs."
+}
+
+# Domains to exclude
+if (!([string]::IsNullOrWhitespace($Domains_To_Exclude))) {
+	Write-Log "|| Excluding $(($Domains_To_Exclude | Measure-Object).count) Domain(s)..."
+
+	$ExcludedDomains_Accounts = [System.Collections.Generic.List[PSObject]]::new()
+	Get-ADUser -filter * | Select-Object Name,SamAccountName,UserPrincipalName,Enabled,DistinguishedName | ForEach-Object {
+		foreach ($Domain in $Domains_To_Exclude) {
+			if ($_.UserPrincipalName -eq (($_.SamAccountName) + "@" + $Domain)) {
+				$ExcludedDomains_Accounts.Add($_) | Out-Null
+				$Exclusions.Add($_) | Out-Null
+			}
+		}
+	} ; Write-Log "|| - Excluded $(($ExcludedDomains_Accounts | Measure-Object).count) accounts with excluded domains."
+}
+#endregion Exclusions
+
+$AccountsToUpdate = Get-ADUser -Filter * -Properties Enabled | Where-Object {
+	( ($_.UserPrincipalName -notin $Exclusions.UserPrincipalName) -and ((($_.UserPrincipalName -split "@")[1]) -in $DomainsToUpdate) )
+} | Select-Object Name,SamAccountName,userPrincipalName | Sort-Object Name
+
+if ($AccountsToUpdate) {
+	Write-Log "" ; Write-Log ""
+
+	if ($TestQuantity -gt 0) {
+		$OriginalQuantity = ($AccountsToUpdate | Measure-Object).count
+		$AccountsToUpdate = $AccountsToUpdate | Select-Object -First $TestQuantity
+
+		Write-Log "|| $TestQuantity out of $OriginalQuantity account(s) will be updated."
+	} else { Write-Log "|| $(($AccountsToUpdate | Measure-Object).count) account(s) will be updated." }
+
+	if ($ExportAffectedAccountsToCSV -eq 1) {
+		Write-Log "|| Exporting CSV of affected accounts ($(($AccountsToUpdate | Measure-Object).count))..."
+		
+		$CSV = "2_AffectedAccounts.csv"
+		$AccountsToUpdate | Export-CSV -NoTypeInformation "$LogPath\$CSV"
+		if (Test-Path "$LogPath\$CSV") { Write-Log "|| - Successfully exported CSV." }
+		else { Write-Log ">> - Failed to export CSV." }
+	}
+
+	if ($ExportExcludedAccountsToCSV -eq 1) {
+		Write-Log "|| Exporting CSV of excluded accounts ($(($Exclusions | Measure-Object).count))..."
+		
+		$CSV = "3_ExcludedAccounts.csv"
+		$Exclusions | Export-CSV -NoTypeInformation "$LogPath\$CSV" -ErrorAction SilentlyContinue
+		if (Test-Path "$LogPath\$CSV") { Write-Log "|| - Successfully exported CSV." }
+		else { Write-Log ">> - Failed to export CSV." }
+	}
+	
+	Write-Log "" ; Write-Log ""
+
+
+	# Add an Alias
+	if ($AddAlias -eq 1) {
+		$AccountsToUpdate | ForEach-Object {
+			$NewAlias = $_.SamAccountName + "@" + $NewDomain
+			
+			Write-Log "|| Adding the alias ""$NewAlias"" to ""$($_.Name) - $($_.UserPrincipalName)""..."
+		
+			Get-ADUser -Identity $_.SamAccountName -Properties ProxyAddresses | Set-ADUser -add @{ProxyAddresses = "smtp:$NewAlias"}
+		
+			if ((Get-ADUser -Identity $_.SamAccountName -Properties ProxyAddresses | Select-Object -ExpandProperty ProxyAddresses) -ccontains "smtp:$NewAlias") {
+				Write-Log "|| - Successfully added alias."
+			} else { Write-Log ">> - Failed to add alias."}
+		}
+	} else { Write-Log "Adding an alias was not selected, skipping alias addition." }
+	
+	# Change the Primary Username
+	if ($ChangePrimaryDomain -eq 1) {
+		$AccountsToUpdate | ForEach-Object {
+			$OldUPN = $_.UserPrincipalName
+			$NewUPN = $_.SamAccountName + "@" + $NewDomain
+			$User = Get-ADUser -Identity $_.SamAccountName
+
+			# Update UserPrincipalName (UPN)
+			Write-Log "|| Updating ""$($_.Name)"" UserPrincipalName from ""$OldUPN"" to ""$NewUPN""..."
+	
+			$User | Set-ADUser -UserPrincipalName $NewUPN -EmailAddress $NewUPN
+			if ((Get-ADUser -Identity $_.SamAccountName).UserPrincipalName -eq $NewUPN) { Write-Log "|| - Success." }
+			else { Write-Log ">> - Failed." }
+
+			# Update E-mail field
+			Write-Log "|| Updating the E-mail field..."
+
+			$User | Set-ADUser -EmailAddress $NewUPN
+			if ((Get-ADUser -Identity $_.SamAccountName -Properties Mail).mail -eq $NewUPN) { Write-Log "|| - Success." }
+			else { Write-Log ">> - Failed." }
+
+			# Update ProxyAddresses
+			Write-Log "|| Updating the ProxyAddresses attribute..."
+
+			$User | Set-ADUser -remove @{ProxyAddresses = "SMTP:$OldUPN","smtp:$NewUPN"}
+			$User | Set-ADUser -add @{ProxyAddresses = "SMTP:$NewUPN","smtp:$OldUPN"}
+
+			# Make sure the user has the correct SMTP (primary) and smtp (alias) attributes and not the old primary and alias
+			$ProxyAddresses = Get-ADUser -Identity $_.SamAccountName -Properties ProxyAddresses | Select-Object -ExpandProperty ProxyAddresses
+			if ((($ProxyAddresses -ccontains "SMTP:$NewUPN") -and ($ProxyAddresses -ccontains "smtp:$OldUPN")) -and -not (($ProxyAddresses -ccontains "SMTP:$OldUPN") -or (($ProxyAddresses -ccontains "smtp:$NewUPN")))) {
+				Write-Log "|| - Success."
+			} else { Write-Log ">> - Failed." }
+		}
+	} else { Write-Log "Changing the primary domain was not selected, skipping domain change." }	
+} else { Write-Log "|| No accounts found that need to be updated." }
