@@ -190,7 +190,7 @@ function Enable-BitLockerOnSystemDrive {
 		$Settings.CimInstanceProperties.Item('MultipleInstances').Value = 3
 		$Task = New-ScheduledTask -Action $Action -Trigger $Trigger -Settings $Settings
 
-		Register-ScheduledTask -TaskPath "BrightFlow" -TaskName $blTaskName -InputObject $Task -User 'NT AUTHORITY\SYSTEM' | Out-Null
+		Register-ScheduledTask -TaskPath $BitLockerTaskPath -TaskName $blTaskName -InputObject $Task -User 'NT AUTHORITY\SYSTEM' | Out-Null
 
 		if (Search-blInstallTask) {
 			Write-Host "|| - Successfully created $blTaskName task."
@@ -425,10 +425,10 @@ function Test-BitLocker {
 		if ((Test-NonSystemDrives) -notcontains $false) {
 			Write-Host "BitLocker already enabled."
 
-			Remove-Item "C:\temp\BrightFlow\BitLocker" -Recurse -Force
-			Get-ScheduledTask -TaskPath \BrightFlow\ | Where-Object TaskName -eq "BitLocker Post-Reboot Encryption" -ErrorAction SilentlyContinue | Unregister-ScheduledTask -Confirm:$false
+			Remove-Item $BitLockerDirectory -Recurse -Force
+			Get-ScheduledTask -TaskPath $BitLockerTaskPath | Where-Object TaskName -eq "BitLocker Post-Reboot Encryption" -ErrorAction SilentlyContinue | Unregister-ScheduledTask -Confirm:$false
 
-			if (!(Test-Path "C:\temp\BrightFlow\BitLocker")) { Write-Log "|| - Successfully removed BitLocker Post-Reboot script." }
+			if (!(Test-Path $BitLockerDirectory)) { Write-Log "|| - Successfully removed BitLocker Post-Reboot script." }
 			else { Write-Log ">> - Failed to remove BitLocker Post-Reboot script." }
 
 			#Backup key to Ninja, AD, Entra, network location, or a combination
@@ -457,10 +457,10 @@ function Test-BitLocker {
 			if ((Test-NonSystemDrives) -notcontains $false) {
 				Write-Host "|| - Successfully enabled BitLocker on all non-system drives."
 
-				Remove-Item "C:\temp\BrightFlow\BitLocker" -Recurse -Force
-				Get-ScheduledTask -TaskPath \BrightFlow\ | Where-Object TaskName -eq "BitLocker Post-Reboot Encryption" -ErrorAction SilentlyContinue | Unregister-ScheduledTask -Confirm:$false
+				Remove-Item $BitLockerDirectory -Recurse -Force
+				Get-ScheduledTask -TaskPath $BitLockerTaskPath | Where-Object TaskName -eq "BitLocker Post-Reboot Encryption" -ErrorAction SilentlyContinue | Unregister-ScheduledTask -Confirm:$false
 
-				if (!(Test-Path "C:\temp\BrightFlow\BitLocker")) { Write-Log "|| - Successfully removed BitLocker Post-Reboot script." }
+				if (!(Test-Path $BitLockerDirectory)) { Write-Log "|| - Successfully removed BitLocker Post-Reboot script." }
 				else { Write-Log ">> - Failed to remove BitLocker Post-Reboot script." }
 
 				# Backup key to Ninja, AD, Entra, network location, or a combination
