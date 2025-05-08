@@ -57,7 +57,7 @@ $Paths | ForEach-Object {
 
 	$programs = Get-ItemProperty "$($_.Path)\*"
 
-	if ($programs | Where-Object $($_.Property) -like "*$env:applicationName*") {
-		$programs | Where-Object $($_.Property) -like "*$env:applicationName*"
+	if ($programs | Where-Object { ($_.Property -like "*$env:applicationName*") -or ($_.Publisher -like "*$env:applicationName*") }) {
+		$programs | Where-Object { ($_.Property -like "*$env:applicationName*") -or ($_.Publisher -like "*$env:applicationName*") }
 	} else { Write-Host "|| - No matches found." }
 }
