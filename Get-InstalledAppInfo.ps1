@@ -4,6 +4,7 @@
 	.DESCRIPTION
 		Checks for machine-wide and per-user locations for installation/uninstallation info
 	.NOTES
+		2025-05-12: V2.1 - Optimized result output, will now show results for an application name OR publisher that matches search criteria
 		2024-08-13: V2.0 - Refactored for machine-wide and per-user searching, more efficient/programatic for future additions
 		2024-03-21: V1.0 - Initial version
 	.FUNCTIONALITY
@@ -55,9 +56,9 @@ $Paths | ForEach-Object {
 	Write-Host "`n----------------------------`n"
 	Write-Host "|| Searching $($_.Path) ($($_.Location))..."
 
-	$programs = Get-ItemProperty "$($_.Path)\*"
+	$programs = Get-ItemProperty "$($_.Path)\*" | Where-Object { $_.Property -or $_.Publisher -match $env:applicationName }
 
-	if ($programs | Where-Object { ($_.Property -like "*$env:applicationName*") -or ($_.Publisher -like "*$env:applicationName*") }) {
-		$programs | Where-Object { ($_.Property -like "*$env:applicationName*") -or ($_.Publisher -like "*$env:applicationName*") }
+	if ($programs) {
+		$programs
 	} else { Write-Host "|| - No matches found." }
 }
