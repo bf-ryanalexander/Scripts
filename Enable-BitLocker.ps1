@@ -4,6 +4,7 @@
 	.DESCRIPTION
 		Checks to see if the device is utilizing BitLocker Drive Encryption with TPM as the Key Protector Type and saves the recovery key to the specified location
 	.NOTES
+ 		2025-05-06: V3.0.1 - Updated BitLockerRegistryKey variable to force create the path if it doesn't exist
 		2025-05-06: V3.0 - Refactored drive testing to ensure all internal drives are encrypted with auto-unlock capability,
 							added re-encryption process for improperly configured BitLocker,
 							added backing up to Entra ID with confirmation,
@@ -27,11 +28,12 @@
 			bitlockerSavedToEntra - Checkbox
 			bitlockerSavedToNetwork - Checkbox
 	.NOTES
+		TODO: Check Windows Update scenario; BL is suspended for WU, possibly triggering Bad Scenario #3 "Drive is encrypted but protection is off"
 		TODO: Clean up server deployment, still pretty noisy and a bit buggy.
 		TODO: See if I can silence the "BitLocker is encrypting your system" toast notification and center-screen "Encrypting..." progress bar, initial research shows this is unlikely.
 #>
 # Customization options:
-$BitLockerRegistryKey = "HKLM:\Software\BrightFlow\BitLocker" # Which Registry key to save registry entries in
+$BitLockerRegistryKey = "HKLM:\Software\BrightFlowTest\BitLocker" # Which Registry key to save registry entries in
 $BitLockerDirectory = "C:\temp\BrightFlow\BitLocker" # Which folder in File Explorer to save the post-reboot script
 $BitLockerTaskPath = "\BrightFlow\" # Which folder in Task Scheduler to save the task
 $TimeBetweenChecks = "300"	# Number of seconds before re-checking if the decryption/encryption process has finished.
@@ -43,7 +45,7 @@ $TimeBetweenChecks = "300"	# Number of seconds before re-checking if the decrypt
 if (-not (Test-Path $BitLockerRegistryKey)) {
 	Write-Host "|| Creating BitLocker registry key..."
 
-	New-Item $BitLockerRegistryKey | Out-Null
+	New-Item $BitLockerRegistryKey -Force | Out-Null
 
 	if (Test-Path $BitLockerRegistryKey) { Write-Host "|| - Successfully created BitLocker registry key." }
 	else { Write-Host ">> - Failed to create BitLocker registry key." }
