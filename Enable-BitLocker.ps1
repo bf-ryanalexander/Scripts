@@ -4,6 +4,7 @@
 	.DESCRIPTION
 		Checks to see if the device is utilizing BitLocker Drive Encryption with TPM as the Key Protector Type and saves the recovery key to the specified location
 	.NOTES
+ 		2025-05-13: V3.0.2 - Cleaned up "BitLocker already enabled" cleanup task
  		2025-05-06: V3.0.1 - Updated BitLockerRegistryKey variable to force create the path if it doesn't exist
 		2025-05-06: V3.0 - Refactored drive testing to ensure all internal drives are encrypted with auto-unlock capability,
 							added re-encryption process for improperly configured BitLocker,
@@ -427,11 +428,10 @@ function Test-BitLocker {
 		if ((Test-NonSystemDrives) -notcontains $false) {
 			Write-Host "BitLocker already enabled."
 
-			Remove-Item $BitLockerDirectory -Recurse -Force
-			Get-ScheduledTask -TaskPath $BitLockerTaskPath | Where-Object TaskName -eq "BitLocker Post-Reboot Encryption" -ErrorAction SilentlyContinue | Unregister-ScheduledTask -Confirm:$false
-
-			if (!(Test-Path $BitLockerDirectory)) { Write-Log "|| - Successfully removed BitLocker Post-Reboot script." }
-			else { Write-Log ">> - Failed to remove BitLocker Post-Reboot script." }
+			if ($BitLockerDirectory) { Remove-Item $BitLockerDirectory -Recurse -Force -ErrorAction SilentlyContinue }
+			if (Get-ScheduledTask -TaskPath $BitLockerTaskPath) { Get-ScheduledTask -TaskPath $BitLockerTaskPath | Where-Object TaskName -eq "BitLocker Post-Reboot Encryption" -ErrorAction SilentlyContinue | Unregister-ScheduledTask -Confirm:$false }
+			if (!(Test-Path $BitLockerDirectory)) { Write-Host "|| - Successfully removed BitLocker Post-Reboot script." }
+			else { Write-Host ">> - Failed to remove BitLocker Post-Reboot script." }
 
 			#Backup key to Ninja, AD, Entra, network location, or a combination
 			Test-BitLockerBackups
@@ -462,8 +462,8 @@ function Test-BitLocker {
 				Remove-Item $BitLockerDirectory -Recurse -Force
 				Get-ScheduledTask -TaskPath $BitLockerTaskPath | Where-Object TaskName -eq "BitLocker Post-Reboot Encryption" -ErrorAction SilentlyContinue | Unregister-ScheduledTask -Confirm:$false
 
-				if (!(Test-Path $BitLockerDirectory)) { Write-Log "|| - Successfully removed BitLocker Post-Reboot script." }
-				else { Write-Log ">> - Failed to remove BitLocker Post-Reboot script." }
+				if (!(Test-Path $BitLockerDirectory)) { Write-Host "|| - Successfully removed BitLocker Post-Reboot script." }
+				else { Write-Host ">> - Failed to remove BitLocker Post-Reboot script." }
 
 				# Backup key to Ninja, AD, Entra, network location, or a combination
 				Test-BitLockerBackups
