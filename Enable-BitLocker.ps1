@@ -4,7 +4,7 @@
 	.DESCRIPTION
 		Checks to see if the device is utilizing BitLocker Drive Encryption with TPM as the Key Protector Type and saves the recovery key to the specified location
 	.NOTES
- 		2025-05-13: V3.0.3 - Fixed regex matching on saving key to Ninja
+ 		2025-05-14: V3.1 - Fixed regex matching on saving key to Ninja, fixed confirmation for backing up key to Entra
  		2025-05-13: V3.0.2 - Cleaned up "BitLocker already enabled" cleanup task
  		2025-05-06: V3.0.1 - Updated BitLockerRegistryKey variable to force create the path if it doesn't exist
 		2025-05-06: V3.0 - Refactored drive testing to ensure all internal drives are encrypted with auto-unlock capability,
@@ -168,11 +168,14 @@ function Enable-BitLockerOnSystemDrive {
 				if ((Test-NonSystemDrives) -notcontains $false) {
 					Write-Log "|| - Successfully enabled BitLocker on all non-system drives."
 
-					Remove-Item "C:\temp\BrightFlow\BitLocker" -Recurse -Force
-					Get-ScheduledTask -TaskPath \BrightFlow\ | Where-Object TaskName -eq "BitLocker Post-Reboot Encryption" -ErrorAction SilentlyContinue | Unregister-ScheduledTask -Confirm:$false
+					if (Get-ScheduledTask -TaskPath \BrightFlow\ | Where-Object TaskName -eq "BitLocker Post-Reboot Encryption" -ErrorAction SilentlyContinue) { Get-ScheduledTask -TaskPath \BrightFlow\ | Where-Object TaskName -eq "BitLocker Post-Reboot Encryption" -ErrorAction SilentlyContinue | Unregister-ScheduledTask -Confirm:$false }
+					if (Test-Path "C:\temp\BrightFlow\BitLocker") {
+						Remove-Item "C:\temp\BrightFlow\BitLocker" -Recurse -Force -ErrorAction SilentlyContinue
 
-					if (!(Test-Path "C:\temp\BrightFlow\BitLocker")) { Write-Log "|| - Successfully removed BitLocker Post-Reboot script." }
-					else { Write-Log ">> - Failed to remove BitLocker Post-Reboot script." }
+						if (!(Test-Path "C:\temp\BrightFlow\BitLocker")) { Write-Log "|| - Successfully removed BitLocker Post-Reboot script." }
+						else { Write-Log ">> - Failed to remove BitLocker Post-Reboot script." }
+					}
+
 				} else { Write-Log ">> - Failed to enable BitLocker on all non-system drives." }
 			} else { Write-Log ">> - Failed to enable BitLocker on the system drive within 24 hours." }			
 '@
@@ -215,7 +218,7 @@ function Test-IfKeySavedToNinja {
 		if (([string]::IsNullOrWhitespace((Ninja-Property-Get bitlockerKeys)))) { return $false }
 		else {
 			$BitLockerDrives | ForEach-Object {
-				$DriveData = ([regex]::match((Ninja-Property-Get bitlockerKeys), "(?s)(Mount Point: $($_.MountPoint).*?)(?:(?:\r*\n){2}|Recovery Password:[^:\r\n]*$|KeyFileName.*.BEK)"))
+				$DriveData = ([regex]::match((Ninja-Property-Get bitlockerKeys), "(?s)(Mount Point: $($_.MountPoint).*?)(?:Recovery Password:[^:\r\n]*$|KeyFileName.*.BEK)"))
 				if (($DriveData -like "*Mount Point: $($_.MountPoint)*") -and (($DriveData -like "*Recovery Password:*") -or ($DriveData -like "*Drive not encrypted.*"))) { return $true } else { return $false }
 			}
 		}
@@ -241,7 +244,7 @@ function Test-IfKeySavedToNinja {
 
 		if (Search-KeyInNinja) { Write-Host "|| - Successfully saved BitLocker Key to Ninja." }
 		else { Write-Host ">> - Failed to save BitLocker Key to Ninja." }
-	}
+	} else { Write-Host "BitLocker already backed up to Ninja." }
 }
 function Test-IfKeySavedToNetwork {
 	$BitLockerNetworkPath = Ninja-Property-Get bitlockerNetworkPath
@@ -374,9 +377,9 @@ function Test-IfKeySavedToEntra {
 				Start-Sleep -Seconds 3 # Takes a second for the event log to be created; 1 second works but set to 3 for buffer
 
 				function Get-LastEvent { Get-WinEvent -ProviderName Microsoft-Windows-BitLocker-API -FilterXPath "*[System[(EventID=845)] and EventData[Data[@Name='ProtectorGUID'] and (Data='$($id.KeyProtectorId)')]]" -MaxEvents 1 }
-				if (((Get-LastEvent).TimeCreated -gt (Get-Date).AddHours(-1)) -and ((Get-LastEvent).Message -like "*BitLocker Drive Encryption recovery information for volume $($_.MountPoint) was backed up successfully to your Azure AD.*")) {
-					Write-Host "|| - Successfully backed up KeyProtectorId to Entra."
-				} else { Write-Host ">> - Failed to backup KeyProtectorId to Entra." ; $counter++ }
+				if (((Get-LastEvent).TimeCreated -gt (Get-Date).AddHours(-1)) -and ((Get-LastEvent).Message -like "*BitLocker Drive Encryption recovery information for volume $($_.MountPoint) was backed up successfully*")) {
+					Write-Host "|| - Successfully backed up BitLocker Key to Entra."
+				} else { Write-Host ">> - Failed to backup BitLocker Key to Entra." ; $counter++ }
 			}
 		}
 
@@ -387,7 +390,7 @@ function Test-IfKeySavedToEntra {
 
 			if ((Ninja-Property-Get BitLockerSavedToEntra) -eq 1) { Write-Host "|| - Successfully updated the custom field." }
 			else { Write-Host ">> - Failed to update the custom field." }
-		} else { Write-Host ">> - Failed to backup all recovery passwords to Entra." }
+		} else { Write-Host ">> - Failed to backup all BitLocker Keys to Entra." }
 	}
 }
 function Test-JoinStatus {
@@ -431,13 +434,13 @@ function Test-BitLocker {
 			Write-Host "BitLocker already enabled."
 
 			if (Get-ScheduledTask -TaskPath $BitLockerTaskPath) { Get-ScheduledTask -TaskPath $BitLockerTaskPath | Where-Object TaskName -eq "BitLocker Post-Reboot Encryption" -ErrorAction SilentlyContinue | Unregister-ScheduledTask -Confirm:$false }
-			if ($BitLockerDirectory) {
+			if (Test-Path $BitLockerDirectory) {
 				Remove-Item $BitLockerDirectory -Recurse -Force -ErrorAction SilentlyContinue
 
 				if (!(Test-Path $BitLockerDirectory)) { Write-Host "|| - Successfully removed BitLocker Post-Reboot script." }
 				else { Write-Host ">> - Failed to remove BitLocker Post-Reboot script." }
 			}
-			
+
 			#Backup key to Ninja, AD, Entra, network location, or a combination
 			Test-BitLockerBackups
 		} else {
