@@ -4,7 +4,11 @@
 	.DESCRIPTION
 		Checks to see if the device is utilizing BitLocker Drive Encryption with TPM as the Key Protector Type and saves the recovery key to the specified location
 	.NOTES
- 		2025-05-14: V3.1 - Fixed regex matching on saving key to Ninja, fixed confirmation for backing up key to Entra
+ 		2025-05-14: V3.1 - Fixed regex matching on saving key to Ninja,
+							confirmation for backing up key to Entra (sometimes it says backed up to Entra ID, sometimes it says backed up to Azure AD...),
+							BitLocker folder deletion post-enablement,
+							error cleanup in server portion,
+							saving to network failed as it added "\\" to the network path even though "\\" is required
  		2025-05-13: V3.0.2 - Cleaned up "BitLocker already enabled" cleanup task
  		2025-05-06: V3.0.1 - Updated BitLockerRegistryKey variable to force create the path if it doesn't exist
 		2025-05-06: V3.0 - Refactored drive testing to ensure all internal drives are encrypted with auto-unlock capability,
@@ -271,15 +275,15 @@ function Test-IfKeySavedToNetwork {
 			if (!(Search-SavedBitLockerKey)) {
 				Write-Host "|| Recovery key has not been saved yet, saving on $ServerName..."
 		
-				(Get-BitLockerVolume).KeyProtector | Out-File "\\$BitLockerNetworkPath\$env:computername.txt"
+				(Get-BitLockerVolume).KeyProtector | Out-File "$BitLockerNetworkPath\$env:computername.txt"
 		
 				if (Search-SavedBitLockerKey) {
-					Write-Host "|| - Successfully saved BitLocker recovery key to ""\\$BitLockerNetworkPath\$env:computername.txt."""
+					Write-Host "|| - Successfully saved BitLocker recovery key to ""$BitLockerNetworkPath\$env:computername.txt."""
 
 					Search-BitLockerSavedToNetworkCustomField
-				} else { Write-Host ">> - Failed to save BitLocker recovery key to ""\\$BitLockerNetworkPath\$env:computername.txt.""" }
+				} else { Write-Host ">> - Failed to save BitLocker recovery key to ""$BitLockerNetworkPath\$env:computername.txt.""" }
 			} else {
-				Write-Host "Recovery key already saved to network."
+				Write-Host "BitLocker already backed up to network."
 
 				Search-BitLockerSavedToNetworkCustomField
 			}
@@ -333,14 +337,17 @@ function Test-IfKeySavedToAD {
 						Throw
 					} catch {
 						if ($BackupError.Exception.Message -notlike "*The key protector specified cannot be used for this operation*") {
-							Write-Host "|| - Successfully backed up BitLocker to Active Directory."
-
-							Ninja-Property-Set BitLockerSavedToAD 1
-
-							if (Ninja-Property-Get BitLockerSavedToAD -eq 1) { Write-Host "|| - Successfully updated BitLockerSavedToAD Custom Field." }
-							else { Write-Host ">> - Failed to update BitLockerSavedToAD Custom Field." }
-						} else { Write-Host ">> - Failed to backup key to Active Directory." }
+							Write-Host "|| - Successfully backed up KeyProtector ""$_"" to Active Directory."
+							$counter++
+						} else { Write-Host ">> - Failed to backup KeyProtector ""$_"" to Active Directory." }
 					}
+				}
+
+				if ($counter -eq 0) {
+					Ninja-Property-Set BitLockerSavedToAD 1
+
+					if (Ninja-Property-Get BitLockerSavedToAD -eq 1) { Write-Host "|| - Successfully updated BitLockerSavedToAD Custom Field." }
+					else { Write-Host ">> - Failed to update BitLockerSavedToAD Custom Field." }
 				}
 			} else { Write-Host ">> Failed to set all required properties, cannot back up to Active Directory" }
 		}
@@ -507,7 +514,7 @@ function Test-BitLocker {
 			Get-BitLockerVolume -MountPoint $ENV:SystemDrive | Disable-BitLocker -ErrorAction SilentlyContinue | Out-Null
 
 			while ((Get-BitLockerVolume -MountPoint $ENV:SystemDrive).VolumeStatus -ne "FullyDecrypted") {
-				Write-Host "|| - Decrypting system drive..."
+				Write-Host "|| - Decrypting system drive...$(Get-BitLockerVolume -MountPoint $ENV:SystemDrive | Select-Object -ExpandProperty EncryptionPercentage)% complete. [Check #$counter]"
 				Start-Sleep $TimeBetweenChecks
 			}
 
