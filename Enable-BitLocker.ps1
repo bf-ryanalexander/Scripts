@@ -540,11 +540,11 @@ if (((Search-blEncryptionRebootStatus) -eq "PendingReboot") -and ((Search-blEncr
 	Write-Host ">> BitLocker is pending reboot to begin encryption."
 } elseif ($osVersion -like "*Server*") {
 	function Search-BDEStatus { Get-WindowsFeature | Where-Object DisplayName -eq "BitLocker Drive Encryption" -ErrorAction SilentlyContinue }
+	function Get-BDEFeatureStatus { Get-ItemProperty -Path $BitLockerRegistryKey -Name "BDEFeatureStatus" -ErrorAction SilentlyContinue }
+	function Get-BDEFeatureDatePending { Get-ItemProperty -Path $BitLockerRegistryKey -Name "BDEFeatureDatePending" -ErrorAction SilentlyContinue }
 	if ((Search-BDEStatus).Installed -eq $false) {
-		function Get-BDEFeatureDatePending { Get-ItemProperty -Path $BitLockerRegistryKey -Name "BDEFeatureDatePending" -ErrorAction SilentlyContinue }
 		if (
-			(Get-ItemProperty -Path $BitLockerRegistryKey -Name "BDEFeatureStatus") -and
-			( (Get-BDEFeatureDatePending) -and (([datetime](Get-BDEFeatureDatePending).BDEFeatureDatePending) -lt $DateMinusThirty) )
+			(Get-BDEFeatureStatus) -and ( (Get-BDEFeatureDatePending) -and (([datetime](Get-BDEFeatureDatePending).BDEFeatureDatePending) -lt $DateMinusThirty) )
 		) { Write-Host ">> Server is pending reboot to install the ""BitLocker Drive Encryption"" role." }
 		else {
 			Write-Host "|| Installing BitLocker Drive Encryption feature..."
@@ -557,13 +557,13 @@ if (((Search-blEncryptionRebootStatus) -eq "PendingReboot") -and ((Search-blEncr
 				New-ItemProperty -Path $BitLockerRegistryKey -Name "BDEFeatureStatus" -Value "PendingReboot" -Force | Out-Null
 				New-ItemProperty -Path $BitLockerRegistryKey -Name "BDEFeatureDatePending" -Value "2025-01-12T12:27:44" -Force | Out-Null
 
-				if ((Get-ItemProperty -Path $BitLockerRegistryKey -Name "BDEFeatureStatus") -and (Get-BDEFeatureDatePending)) {
+				if ((Get-BDEFeatureStatus) -and (Get-BDEFeatureDatePending)) {
 					Write-Host "|| - Successfully created registry entries. Ready for reboot."
 				} else { Write-Host ">> - Failed to create registry entries." }
 			} else { Write-Host ">> - Failed to install BitLocker Drive Encryption feature." }
 		}
 	} else {
-		if ((Get-ItemProperty -Path $BitLockerRegistryKey -Name "BDEFeatureStatus") -or (Get-BDEFeatureDatePending)) {
+		if ((Get-BDEFeatureStatus) -or (Get-BDEFeatureDatePending)) {
 			Write-Host "|| Removing registry entries..."
 
 			Remove-ItemProperty -Path $BitLockerRegistryKey -Name *
