@@ -4,6 +4,7 @@
 	.DESCRIPTION
 		Checks to see if the device is utilizing BitLocker Drive Encryption with TPM as the Key Protector Type and saves the recovery key to the specified location
 	.NOTES
+ 		2025-05-13: V3.0.3 - Fixed regex matching on saving key to Ninja
  		2025-05-13: V3.0.2 - Cleaned up "BitLocker already enabled" cleanup task
  		2025-05-06: V3.0.1 - Updated BitLockerRegistryKey variable to force create the path if it doesn't exist
 		2025-05-06: V3.0 - Refactored drive testing to ensure all internal drives are encrypted with auto-unlock capability,
@@ -116,8 +117,7 @@ function Enable-BitLockerOnSystemDrive {
 			function Search-blEncryptionRebootStatus { (Get-ItemProperty $BitLockerRegistryKey -ErrorAction SilentlyContinue).EncryptionRebootStatus }
 			function Search-blEncryptionDatePending { (Get-ItemProperty $BitLockerRegistryKey -ErrorAction SilentlyContinue).EncryptionDatePending }
 
-			Remove-ItemProperty -Path $BitLockerRegistryKey -Name "EncryptionRebootStatus"
-			Remove-ItemProperty -Path $BitLockerRegistryKey -Name "EncryptionDatePending"
+			Remove-ItemProperty -Path $BitLockerRegistryKey -Name *
 
 			if ((!(Search-blEncryptionRebootStatus)) -and (!(Search-blEncryptionDatePending))) {
 				Write-Log "|| - Successfully removed registry values."
@@ -212,10 +212,12 @@ function Enable-BitLockerOnSystemDrive {
 #region Test if keys are saved to Ninja, Network Share, AD, Entra
 function Test-IfKeySavedToNinja {
 	function Search-KeyInNinja {
-		$BitLockerDrives | ForEach-Object {
-			$DriveData = ([regex]::match((Ninja-Property-Get bitlockerKeys), "Mount Point: $($_.MountPoint)(.*?)(?=Mount|KeyFileName:.*)")).Value
-			
-			if (($DriveData -like "*Mount Point: $($_.MountPoint)*") -and (($DriveData -like "*Recovery Password:*") -or ($DriveData -like "*Drive not encrypted.*"))) { return $true } else { return $false }
+		if (([string]::IsNullOrWhitespace((Ninja-Property-Get bitlockerKeys)))) { return $false }
+		else {
+			$BitLockerDrives | ForEach-Object {
+				$DriveData = ([regex]::match((Ninja-Property-Get bitlockerKeys), "(?s)(Mount Point: $($_.MountPoint).*?)(?:(?:\r*\n){2}|Recovery Password:[^:\r\n]*$|KeyFileName.*.BEK)"))
+				if (($DriveData -like "*Mount Point: $($_.MountPoint)*") -and (($DriveData -like "*Recovery Password:*") -or ($DriveData -like "*Drive not encrypted.*"))) { return $true } else { return $false }
+			}
 		}
 	}
 	if ((Search-KeyInNinja) -contains $false) {
@@ -428,11 +430,14 @@ function Test-BitLocker {
 		if ((Test-NonSystemDrives) -notcontains $false) {
 			Write-Host "BitLocker already enabled."
 
-			if ($BitLockerDirectory) { Remove-Item $BitLockerDirectory -Recurse -Force -ErrorAction SilentlyContinue }
 			if (Get-ScheduledTask -TaskPath $BitLockerTaskPath) { Get-ScheduledTask -TaskPath $BitLockerTaskPath | Where-Object TaskName -eq "BitLocker Post-Reboot Encryption" -ErrorAction SilentlyContinue | Unregister-ScheduledTask -Confirm:$false }
-			if (!(Test-Path $BitLockerDirectory)) { Write-Host "|| - Successfully removed BitLocker Post-Reboot script." }
-			else { Write-Host ">> - Failed to remove BitLocker Post-Reboot script." }
+			if ($BitLockerDirectory) {
+				Remove-Item $BitLockerDirectory -Recurse -Force -ErrorAction SilentlyContinue
 
+				if (!(Test-Path $BitLockerDirectory)) { Write-Host "|| - Successfully removed BitLocker Post-Reboot script." }
+				else { Write-Host ">> - Failed to remove BitLocker Post-Reboot script." }
+			}
+			
 			#Backup key to Ninja, AD, Entra, network location, or a combination
 			Test-BitLockerBackups
 		} else {
@@ -520,8 +525,7 @@ function Test-BitLocker {
 if ((Search-blEncryptionDatePending) -and ((Search-blEncryptionDatePending) -lt $DateMinusThirty)) {
 	Write-Host "|| BitLocker has been pending reboot for over 30 days, removing registry value(s)..."
 
-	Remove-ItemProperty -Path $BitLockerRegistryKey -Name "EncryptionRebootStatus"
-	Remove-ItemProperty -Path $BitLockerRegistryKey -Name "EncryptionDatePending"
+	Remove-ItemProperty -Path $BitLockerRegistryKey -Name *
 
 	if (-not ((Search-blEncryptionRebootStatus) -and ((Search-blEncryptionDatePending)))) {
 		Write-Host "|| - Successfully removed registry value(s)."
@@ -559,8 +563,7 @@ if (((Search-blEncryptionRebootStatus) -eq "PendingReboot") -and ((Search-blEncr
 		if ((Get-ItemProperty -Path $BitLockerRegistryKey -Name "BDEFeatureStatus") -or (Get-BDEFeatureDatePending)) {
 			Write-Host "|| Removing registry entries..."
 
-			Remove-ItemProperty -Path $BitLockerRegistryKey -Name "BDEFeatureStatus"
-			Remove-ItemProperty -Path $BitLockerRegistryKey -Name "BDEFeatureDatePending"
+			Remove-ItemProperty -Path $BitLockerRegistryKey -Name *
 		}
 
 		if ( (Get-BitLockerVolume).VolumeStatus -contains "EncryptionInProgress" ) {
