@@ -39,7 +39,7 @@
 		TODO: See if I can silence the "BitLocker is encrypting your system" toast notification and center-screen "Encrypting..." progress bar, initial research shows this is unlikely.
 #>
 # Customization options:
-$BitLockerRegistryKey = "HKLM:\Software\BrightFlowTest\BitLocker" # Which Registry key to save registry entries in
+$BitLockerRegistryKey = "HKLM:\Software\BrightFlow\BitLocker" # Which Registry key to save registry entries in
 $BitLockerDirectory = "C:\temp\BrightFlow\BitLocker" # Which folder in File Explorer to save the post-reboot script
 $BitLockerTaskPath = "\BrightFlow\" # Which folder in Task Scheduler to save the task
 $TimeBetweenChecks = "300"	# Number of seconds before re-checking if the decryption/encryption process has finished.
