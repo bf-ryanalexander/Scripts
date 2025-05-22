@@ -27,12 +27,12 @@
 	.LINK
 		https://github.com/bf-ryanalexander/Scripts/blob/main/Enable-BitLocker.ps1
 	.NOTES
-		Required Custom Fields: (Field Name - Type)
-			bitlockerKeys - Multi-line
-			bitlockerNetworkPath - Text
-			bitlockerSavedToAd - Checkbox
-			bitlockerSavedToEntra - Checkbox
-			bitlockerSavedToNetwork - Checkbox
+		Required Custom Fields: (Field Name - Type - Scope)
+			bitlockerKeys - Multi-line - Device
+			bitlockerNetworkPath - Text - Device, Location, Organization
+			bitlockerSavedToAd - Checkbox - Device
+			bitlockerSavedToEntra - Checkbox - Device
+			bitlockerSavedToNetwork - Checkbox - Device
 	.NOTES
 		TODO: Check Windows Update scenario; BL is suspended for WU, possibly triggering Bad Scenario #3 "Drive is encrypted but protection is off"
 		TODO: Clean up server deployment, still pretty noisy and a bit buggy.
@@ -544,7 +544,7 @@ if ((Search-blEncryptionDatePending) -and ((Search-blEncryptionDatePending) -lt 
 
 #region Check for currently running processes, if it's a server, or if it's ready for BitLocker
 if (((Search-blEncryptionRebootStatus) -eq "PendingReboot") -and ((Search-blEncryptionDatePending) -gt $DateMinusThirty)) {
-	Write-Host ">> BitLocker is pending reboot to begin encryption."
+	Write-Host ">> BitLocker is pending reboot since $(Search-blEncryptionDatePending) to begin encryption."
 } elseif ($osVersion -like "*Server*") {
 	function Search-BDEStatus { Get-WindowsFeature | Where-Object DisplayName -eq "BitLocker Drive Encryption" -ErrorAction SilentlyContinue }
 	function Get-BDEFeatureStatus { Get-ItemProperty -Path $BitLockerRegistryKey -Name "BDEFeatureStatus" -ErrorAction SilentlyContinue }
