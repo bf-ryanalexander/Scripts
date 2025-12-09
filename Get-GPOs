@@ -1,0 +1,43 @@
+if ((Get-CimInstance -ClassName Win32_ComputerSystem).DomainRole -in 4..5) { # If PDC or BDC
+	$GPOs = Get-GPO -All
+	[System.Collections.ArrayList]$GPO_Array = @()
+	function Add-GPOInfo {
+		$GPOInfo = New-Object PSObject
+		$GPOInfo | Add-Member -type NoteProperty -Name 'GPO_Name' -Value $GPO.DisplayName
+		$GPOInfo | Add-Member -type NoteProperty -Name 'Link_Path' -Value $LinkPath
+		$GPOInfo | Add-Member -type NoteProperty -Name 'Status' -Value $LinkStatus
+
+		$GPO_Array.Add($GPOInfo) | Out-Null
+	}
+
+	foreach ($GPO in $GPOs) {
+		try {
+			[xml]$Report = $GPO | Get-GPOReport -ReportType XML -ErrorAction Stop
+			$Links = $Report.GPO.LinksTo
+
+			if ($Links) {
+				$LinkPath = $Report.GPO.LinksTo.SOMPath
+				$LinkStatus = $Report.GPO.LinksTo.Enabled
+
+				if ($Links.count -gt 1) {
+					foreach ($link in $Links) {
+						$LinkPath = $link.SOMPath
+						$LinkStatus = $link.Enabled
+
+						Add-GPOInfo
+					}
+				} else { Add-GPOInfo }
+			} else {
+				$LinkPath = "Not Linked"
+				$LinkStatus = "Not Enabled"
+
+				Add-GPOInfo
+			}
+		} catch {
+			Write-Host "Error processing GPO $($GPO.DisplayName): $($_.Exception.Message)"
+			Write-Host "---"
+		}
+	}
+	
+	$GPO_Array | Sort-Object GPO_Name
+}
