@@ -4,8 +4,13 @@
 	.DESCRIPTION
 		Checks to see if the device is utilizing BitLocker Drive Encryption with TPM as the Key Protector Type and saves the recovery key to the specified location
 	.NOTES
-		2025-07-25: V4.1 - Added check for Windows 10/11 Pro, fixed logging post-reboot,
-							accounted for post-reboot scenario that could silently fail because of refactor.
+		2025-12-08: V4.4 - Updated to backup the keys during the initial run, so keys are backed up prior to encryption, suppressed output when defining $SystemDriveBitLocker
+		2025-08-04: V4.3 - Accounted for edge case where BitLocker could have just TPM for a keyprotector with no RecoveryPassword and not flag as a "bad scenario"
+							added output to the "Decryption in progress" result to show remaining percentage if the script is ran again.
+		2025-07-28: V4.2 - Add check to ensure the domain is reachable before initiating backup of key to AD,
+							added output to the "Encryption in progress" result to show current progress if the script is ran after a device is restarted to begin encryption,
+							added function to resume BitLocker encryption if previously configured and suspended permanently.
+		2025-07-25: V4.1 - Added check for Windows 10/11 Pro, fixed logging post-reboot, accounted for post-reboot scenario that could silently fail because of refactor.
 		2025-07-15: V4.0 - Refactored to run backups immediately after post-reboot encryption process finishes,
 							no longer requires running script from Ninja a second time or duplicating massive sections of code.
 		2025-07-14: V3.2 - Fixed AD backup function, fixed Decryption check progress function, changed test function for saving to network path
@@ -40,9 +45,7 @@
 			bitlockerSavedToEntra - Checkbox - Device
 			bitlockerSavedToNetwork - Checkbox - Device
 	.NOTES
-		TODO: Add domain check before initiating backup of key to AD
 		TODO: Network path doesn't work with non-domain joined saving to domain UNC; mount path, save, dismount?
-		TODO: Check Windows Update scenario; BL is suspended for WU, possibly triggering Bad Scenario #3 "Drive is encrypted but protection is off"
 #>
 
 function StageOne_DefineFunctions { @'
@@ -64,6 +67,7 @@ function StageOne_DefineFunctions { @'
 	}
 
 	$osVersion = (Get-CimInstance win32_operatingsystem).Caption
+	if (Get-Command Get-BitlockerVolume -ErrorAction SilentlyContinue) { $SystemDriveBitLocker = Get-BitlockerVolume -MountPoint $ENV:SystemDrive }
 
 	# Registry
 	function New-BitLockerRegistryKey {
@@ -77,15 +81,45 @@ function StageOne_DefineFunctions { @'
 		}
 	}
 	function Search-blRegistry { Test-Path $BitLockerRegistryKey }
-	$DateMinusThirty = ([datetime](Get-Date)).AddDays(-30)
 	function Search-blEncryptionRebootStatus { (Get-ItemProperty $BitLockerRegistryKey -ErrorAction SilentlyContinue).EncryptionRebootStatus }
 	function Search-blEncryptionDatePending { (Get-ItemProperty $BitLockerRegistryKey -ErrorAction SilentlyContinue).EncryptionDatePending }
+	if (Search-blEncryptionDatePending) { $DaysSincePendingReboot = ((New-TimeSpan -Start (Search-blEncryptionDatePending) -End ([DateTime]::Now)).Days) }
+	else { $DaysSincePendingReboot = $null }
 
 	# Task and Script
 	$blTaskName = "BitLocker Post-Reboot Encryption"
 	$BitLockerTaskPath = "\BrightFlow\"
 	function Search-blInstallTask { Get-ScheduledTask -TaskPath $BitLockerTaskPath | Where-Object TaskName -eq $blTaskName -ErrorAction SilentlyContinue }
 	function Search-blDeployScript { Test-Path "$BitLockerDirectory\Deploy-BitLocker.ps1" -ErrorAction SilentlyContinue }
+	
+	function Clear-BitLockerAutomations {
+		if (Search-blInstallTask) {
+			Write-Host "|| Removing BitLocker task..."
+
+			Search-blInstallTask | Unregister-ScheduledTask -Confirm:$false
+
+			if (-not (Search-blInstallTask)) { Write-Host "|| - Successfully removed BitLocker task." }
+			else { Write-Host ">> - Failed to remove BitLocker task." }
+		}
+
+		if (Test-Path $BitLockerDirectory) {
+			Write-Host "|| Removing BitLocker Post-Reboot script..."
+
+			Remove-Item $BitLockerDirectory -Recurse -Force -ErrorAction SilentlyContinue
+
+			if (-not (Test-Path $BitLockerDirectory)) { Write-Host "|| - Successfully removed BitLocker Post-Reboot script." }
+			else { Write-Host ">> - Failed to remove BitLocker Post-Reboot script." }
+		}
+
+		if ((Search-blEncryptionRebootStatus) -or (Search-blEncryptionDatePending)) {
+			Write-Host "|| Removing registry entries..."
+
+			Remove-ItemProperty -Path $BitLockerRegistryKey -Name *
+
+			if (-not ((Search-blEncryptionRebootStatus) -or (Search-blEncryptionDatePending))) { Write-Host "|| - Successfully removed registry entries." }
+			else { Write-Host ">> - Failed to remove registry entries." }
+		}
+	}
 
 	# Drive Testing
 	function Test-SystemDrive {
@@ -94,6 +128,13 @@ function StageOne_DefineFunctions { @'
 		(-not ([string]::IsNullOrWhitespace((Get-BitLockerVolume -MountPoint $ENV:SystemDrive).KeyProtector))) -and
 		((Get-BitLockerVolume -MountPoint $ENV:SystemDrive).KeyProtector -like "*Tpm*") -and
 		((Get-BitLockerVolume -MountPoint $ENV:SystemDrive).ProtectionStatus -eq "On")
+	}
+	function Test-BadScenarios {
+		( (-not ([string]::IsNullOrWhitespace(($SystemDriveBitLocker).KeyProtector))) -and (([string]::IsNullOrWhitespace(($SystemDriveBitLocker | Where-Object { ($_.KeyProtector.KeyProtectorType -eq "Tpm") -and ($_.KeyProtector.KeyProtectorType -eq "RecoveryPassword") }))))) -or #Bad Scenario #1: Key exists, but not setup to use TPM AND RecoveryPassword
+		( (([string]::IsNullOrWhitespace(($SystemDriveBitLocker).KeyProtector))) -and (($SystemDriveBitLocker).VolumeStatus -eq "FullyEncrypted") ) -or	#Bad Scenario #2: Key does not exist, but drive is encrypted
+		( (($SystemDriveBitLocker).VolumeStatus -eq "FullyEncrypted") -and (($SystemDriveBitLocker).ProtectionStatus -eq "Off") ) -or #Bad Scenario #3: Drive is encrypted but protection is off
+		( ($SystemDriveBitLocker) | Where-Object {($_.EncryptionMethod -ne "Aes256") -and ($_.EncryptionMethod -ne "none")} ) -or #Bad Scenario #4: Drive is not encrypted with AES256 (typically AES-128 instead)
+		( (($SystemDriveBitLocker).VolumeStatus -eq "FullyDecrypted") -and (-not ([string]::IsNullOrWhitespace(($SystemDriveBitLocker).KeyProtector))) ) #Bad Scenario #5: Drive is decrypted but still has a KeyProtector listed
 	}
 	function Test-NonSystemDrives {
 		if ([string]::IsNullOrWhitespace($NonSystemDrives)) { return $true } else {
@@ -105,6 +146,20 @@ function StageOne_DefineFunctions { @'
 				-not ([string]::IsNullOrWhitespace(($driveKeyProtector | Where-Object KeyProtectorType -eq "RecoveryPassword" | Select-Object -ExpandProperty RecoveryPassword))) -and
 				-not ([string]::IsNullOrWhitespace(($driveKeyProtector | Where-Object KeyProtectorType -eq "ExternalKey" | Select-Object -ExpandProperty KeyFileName)))
 			}
+		}
+	}
+
+	function Get-BitLockerStatus {
+		if ( (Get-BitLockerVolume).VolumeStatus -contains "EncryptionInProgress" ) {
+			Write-Host "BitLocker encryption in progress."
+			
+			if (Test-Path "$BitLockerLogs\BitLockerUpdate.log") { Get-Content "$BitLockerLogs\BitLockerUpdate.log" }
+		} elseif ( (Get-BitLockerVolume).VolumeStatus -contains "DecryptionInProgress" ) {
+			Write-Host "BitLocker decryption in progress. $(Get-BitLockerVolume | Where-Object VolumeStatus -eq "DecryptionInProgress" | Select-Object -ExpandProperty EncryptionPercentage)% remaining."
+		} elseif ( ((Search-blEncryptionRebootStatus) -eq "PendingReboot") -and ($DaysSincePendingReboot -lt 30) ) {
+			Write-Host ">> BitLocker is pending reboot since $(Search-blEncryptionDatePending) to begin encryption."
+		} else {
+			Test-BitLocker
 		}
 	}
 '@ }
@@ -125,7 +180,7 @@ function StageTwo_EncryptSystemDrive { @'
 				if (-not ([string]::IsNullOrWhitespace($NonSystemDrives))) {
 					Enable-BitLockerOnNonSystemDrives
 				} else {
-					# Backup key to Ninja, AD, Entra, network location, or a combination
+					# Backup key to Ninja, AD, Entra, network location, or a combination, and cleanup automations
 					Test-BitLockerBackups
 
 					# Cleanup
@@ -192,6 +247,9 @@ function StageTwo_EncryptSystemDrive { @'
 			
 			if ((Get-CimInstance -ClassName Win32_EncryptableVolume  -Namespace "Root\CIMV2\Security\MicrosoftVolumeEncryption").IsVolumeInitializedForProtection -eq $True) {
 				Write-Host "|| - Successfully enabled BitLocker on system drive. Reboot to begin encryption."
+				Write-Host "||"
+
+				Test-BitLockerBackups
 			} else { Write-Host ">> - Failed to enable BitLocker on system drive." }
 		}
 	}
@@ -204,7 +262,7 @@ function StageThree_TestBitLocker { @'
 		$BitLockerDrives = (Get-BitLockerVolume | Where-Object {($_.MountPoint -eq $ENV:SystemDrive) -or ($_.MountPoint -in $NonSystemDrives)})
 
 		function Enable-BitLockerOnNonSystemDrives {
-			Write-Host "Enabling BitLocker on all non-system drives..."
+			Write-Host "|| Enabling BitLocker on all non-system drives..."
 
 			$NonSystemDrives | ForEach-Object {
 				$counter = 0
@@ -229,7 +287,7 @@ function StageThree_TestBitLocker { @'
 			if ((Test-NonSystemDrives) -notcontains $false) {
 				Write-Host "|| - Successfully enabled BitLocker on all non-system drives."
 
-				# Backup key to Ninja, AD, Entra, network location, or a combination
+				# Backup key to Ninja, AD, Entra, network location, or a combination, and cleanup automations
 				Test-BitLockerBackups
 
 				# Cleanup
@@ -237,41 +295,12 @@ function StageThree_TestBitLocker { @'
 			} else { Write-Host ">> - Failed to enable BitLocker on all non-system drives." }
 		}
 
-		function Clear-BitLockerAutomations {
-			if (Get-ScheduledTask -TaskPath $BitLockerTaskPath) {
-				Write-Host "|| Removing BitLocker task..."
-
-				Get-ScheduledTask -TaskPath $BitLockerTaskPath | Where-Object TaskName -eq "BitLocker Post-Reboot Encryption" -ErrorAction SilentlyContinue | Unregister-ScheduledTask -Confirm:$false
-
-				if (-not (Get-ScheduledTask -TaskPath $BitLockerTaskPath)) { Write-Host "|| - Successfully removed BitLocker task." }
-				else { Write-Host ">> - Failed to remove BitLocker task." }
-			}
-
-			if (Test-Path $BitLockerDirectory) {
-				Write-Host "|| Removing BitLocker Post-Reboot script..."
-
-				Remove-Item $BitLockerDirectory -Recurse -Force -ErrorAction SilentlyContinue
-
-				if (-not (Test-Path $BitLockerDirectory)) { Write-Host "|| - Successfully removed BitLocker Post-Reboot script." }
-				else { Write-Host ">> - Failed to remove BitLocker Post-Reboot script." }
-			}
-
-			if ((Search-blEncryptionRebootStatus) -or (Search-blEncryptionDatePending)) {
-				Write-Host "|| Removing registry entries..."
-
-				Remove-ItemProperty -Path $BitLockerRegistryKey -Name *
-
-				if (-not ((Search-blEncryptionRebootStatus) -or (Search-blEncryptionDatePending))) { Write-Host "|| - Successfully removed registry entries." }
-				else { Write-Host ">> - Failed to remove registry entries." }
-			}
-		}
-
 		# Drive is encrypted, a recovery key exists, uses TPM, and protection is enabled
-		if ((Test-SystemDrive) -eq $true) {
+		if (((Test-SystemDrive) -eq $true) -and (-not (Test-BadScenarios))) {
 			if ((Test-NonSystemDrives) -notcontains $false) {
 				Write-Host "BitLocker already enabled."
 
-				# Backup key to Ninja, AD, Entra, network location, or a combination
+				# Backup key to Ninja, AD, Entra, network location, or a combination, and cleanup automations
 				Test-BitLockerBackups
 
 				# Cleanup
@@ -281,16 +310,25 @@ function StageThree_TestBitLocker { @'
 				
 				if (-not ([string]::IsNullOrWhitespace($NonSystemDrives))) {
 					Enable-BitLockerOnNonSystemDrives
-				} else { Test-BitLockerBackups }
+				} else {
+					# Backup key to Ninja, AD, Entra, network location, or a combination, and cleanup automations
+					Test-BitLockerBackups
+
+					# Cleanup
+					Clear-BitLockerAutomations
+				}
 			}
-		} else {
-			if ( # Check for bad scenarios
-				( (-not ([string]::IsNullOrWhitespace((Get-BitLockerVolume -MountPoint $ENV:SystemDrive).KeyProtector))) -and (([string]::IsNullOrWhitespace(((Get-BitLockerVolume -MountPoint $ENV:SystemDrive).KeyProtector | Where-Object KeyProtectorType -eq Tpm)))) ) -or	#Bad Scenario #1: Key exists, but not setup to use TPM
-				( (([string]::IsNullOrWhitespace((Get-BitLockerVolume -MountPoint $ENV:SystemDrive).KeyProtector))) -and ((Get-BitLockerVolume -MountPoint $ENV:SystemDrive).VolumeStatus -eq "FullyEncrypted") ) -or	#Bad Scenario #2: Key does not exist, but drive is encrypted
-				( ((Get-BitLockerVolume -MountPoint $ENV:SystemDrive).VolumeStatus -eq "FullyEncrypted") -and ((Get-BitLockerVolume -MountPoint $ENV:SystemDrive).ProtectionStatus -eq "Off") ) -or	#Bad Scenario #3: Drive is encrypted but protection is off
-				( (Get-BitLockerVolume -MountPoint $ENV:SystemDrive) | Where-Object {($_.EncryptionMethod -ne "Aes256") -and ($_.EncryptionMethod -ne "none")} )	#Bad Scenario #4: Drive is not encrypted with AES256 (typically AES-128 instead)
-			) {
-				Write-Host "|| BitLocker is enabled, but not configured properly. Disabling BitLocker so it can be reconfigured..."
+		} elseif (Test-BadScenarios) {
+			Write-Host "|| BitLocker is configured, but not enabled. Attempting to resume BitLocker encryption..."
+
+			$SystemDriveBitLocker | Resume-BitLocker -ErrorAction SilentlyContinue | Out-Null
+
+			# Check if an event log was created indicating BitLocker was successfully resumed in the last hour for the System Drive
+			if (Get-WinEvent -MaxEvents 5 -FilterHashTable @{ProviderName='Microsoft-Windows-BitLocker-API'} | Where-Object { ($_.TimeCreated -gt ((Get-Date).AddHours(-1))) -and ($_.Message -eq "BitLocker was resumed for volume $ENV:SystemDrive.") }) {
+				Write-Host "|| - Successfully resumed BitLocker encryption."
+			} else {
+				Write-Host ">> - Failed to resume BitLocker."
+				Write-Host "|| Disabling BitLocker so it can be reconfigured..."
 
 				# Decrypt non-system drives if they exist before attempting to decrypt system drive
 				if ($null -ne $NonSystemDrives) {
@@ -309,7 +347,7 @@ function StageThree_TestBitLocker { @'
 				}
 
 				# Decrypt system drive so it can be encrypted properly
-				Get-BitLockerVolume -MountPoint $ENV:SystemDrive | Disable-BitLocker -ErrorAction SilentlyContinue | Out-Null
+				$SystemDriveBitLocker | Disable-BitLocker -ErrorAction SilentlyContinue | Out-Null
 				$counter = 0
 
 				while ((Get-BitLockerVolume -MountPoint $ENV:SystemDrive).VolumeStatus -ne "FullyDecrypted") {
@@ -324,10 +362,10 @@ function StageThree_TestBitLocker { @'
 
 				# Normal encryption process
 				Enable-BitLockerOnSystemDrive
-			} else {
-				# Normal encryption process
-				Enable-BitLockerOnSystemDrive
 			}
+		} else {
+			# Normal encryption process
+			Enable-BitLockerOnSystemDrive
 		}
 	}
 '@ }
@@ -372,7 +410,7 @@ function StageFour_BackupKeys { @'
 		if ($BitLockerNetworkPath) {
 			$ServerName = $BitLockerNetworkPath.split("\\")[2] # Expects a result like "\\Server.company.com\Share" or "\\Server\Share$"; must start with "\\"
 			
-			if (Test-Path $BitLockerNetworkPath) {
+			if (Test-Path $BitLockerNetworkPath -ErrorAction SilentlyContinue) {
 				function Search-SavedBitLockerKey { Test-Path "$BitLockerNetworkPath\$env:computername.txt" }
 				function Search-BitLockerSavedToNetworkCustomField {
 					if ((Ninja-Property-Get BitlockerSavedToNetwork) -ne 1) {
@@ -385,22 +423,24 @@ function StageFour_BackupKeys { @'
 					}
 				}
 
-				if (!(Search-SavedBitLockerKey)) {
+				if (-not (Search-SavedBitLockerKey)) {
 					Write-Host "|| Recovery key has not been saved yet, saving on $ServerName..."
 			
-					(Get-BitLockerVolume).KeyProtector | Out-File "$BitLockerNetworkPath\$env:computername.txt"
+					Try {
+						(Get-BitLockerVolume).KeyProtector | Out-File "$BitLockerNetworkPath\$env:computername.txt" -ErrorAction SilentlyContinue
 			
-					if (Search-SavedBitLockerKey) {
-						Write-Host "|| - Successfully saved BitLocker recovery key to ""$BitLockerNetworkPath\$env:computername.txt."""
+						if (Search-SavedBitLockerKey) {
+							Write-Host "|| - Successfully saved BitLocker recovery key to ""$BitLockerNetworkPath\$env:computername.txt."""
 
-						Search-BitLockerSavedToNetworkCustomField
-					} else { Write-Host ">> - Failed to save BitLocker recovery key to ""$BitLockerNetworkPath\$env:computername.txt.""" }
+							Search-BitLockerSavedToNetworkCustomField
+						} else { Write-Host ">> - Failed to save BitLocker recovery key to ""$BitLockerNetworkPath\$env:computername.txt.""" }
+					} Catch { Write-Host ">> - Do not have permission to save to ""$BitLockerNetworkPath""." }
 				} else {
-					Write-Host "BitLocker already backed up to network."
+					Write-Host "BitLocker already backed up to Network."
 
 					Search-BitLockerSavedToNetworkCustomField
 				}
-			} else { Write-Host ">> Failed to connect to $ServerName, will try to save the key later." }
+			} else { Write-Host ">> Failed to connect to ""$ServerName"" to backup keys to network, will try to save the key later." }
 		}
 	}
 	function Test-IfKeySavedToAD {
@@ -441,27 +481,31 @@ function StageFour_BackupKeys { @'
 			}
 			function Invoke-BackupToAD {
 				if ($counter -eq 0) {
-					Write-Host "|| Backing up BitLocker to Active Directory..."
-					$KeyProtectors = Get-BitLockerVolume -MountPoint $($ENV:SystemDrive) | Select-Object -ExpandProperty KeyProtector | Where-Object KeyProtectorType -ne "Tpm" | Select-Object -ExpandProperty KeyProtectorId
-					foreach ($Protector in $KeyProtectors) {
-						try {
-							Backup-BitLockerKeyProtector $($ENV:SystemDrive) -KeyProtectorId $Protector 2>&1 >$null
-							Set-Variable -Name "BackupError" -Value $Error[0] -Scope Script | Out-Null
-							Throw
-						} catch {
-							if ($BackupError.Exception.Message -notlike "*The key protector specified cannot be used for this operation*") {
-								Write-Host "|| - Successfully backed up KeyProtector ""$Protector"" to Active Directory."
-								$counter++
-							} else { Write-Host ">> - Failed to backup KeyProtector ""$Protector"" to Active Directory." }
+					$Domain = Get-CimInstance -ClassName Win32_NTDomain | Select-Object -ExpandProperty DnsForestName
+
+					if (Test-Path "\\$domain\SYSVOL") { # Verifies the device has connection to AD before backing up the key
+						Write-Host "|| Backing up BitLocker to Active Directory..."
+						$KeyProtectors = Get-BitLockerVolume -MountPoint $($ENV:SystemDrive) | Select-Object -ExpandProperty KeyProtector | Where-Object KeyProtectorType -ne "Tpm" | Select-Object -ExpandProperty KeyProtectorId
+						foreach ($Protector in $KeyProtectors) {
+							try {
+								Backup-BitLockerKeyProtector $($ENV:SystemDrive) -KeyProtectorId $Protector 2>&1 >$null
+								Set-Variable -Name "BackupError" -Value $Error[0] -Scope Script | Out-Null
+								Throw
+							} catch {
+								if ($BackupError.Exception.Message -notlike "*The key protector specified cannot be used for this operation*") {
+									Write-Host "|| - Successfully backed up KeyProtector ""$Protector"" to Active Directory."
+									$counter++
+								} else { Write-Host ">> - Failed to backup KeyProtector ""$Protector"" to Active Directory." }
+							}
 						}
-					}
 
-					if ($counter -ne 0) {
-						Ninja-Property-Set BitLockerSavedToAD 1
+						if ($counter -gt 0) { # If any keys were backed up to AD
+							Ninja-Property-Set BitLockerSavedToAD 1
 
-						if (Ninja-Property-Get BitLockerSavedToAD -eq 1) { Write-Host "|| - Successfully updated BitLockerSavedToAD Custom Field." }
-						else { Write-Host ">> - Failed to update BitLockerSavedToAD Custom Field." }
-					}
+							if ((Ninja-Property-Get BitLockerSavedToAD) -eq 1) { Write-Host "|| - Successfully updated BitLockerSavedToAD Custom Field." }
+							else { Write-Host ">> - Failed to update BitLockerSavedToAD Custom Field." }
+						} else { Write-Host ">> Failed to backup any keys to Active Directory." }
+					} else { Write-Host ">> No connection to domain to backup keys to AD." }
 				} else { Write-Host ">> Failed to set all required properties, cannot back up to Active Directory" }
 			}
 			if (!(Search-FVEPath)) {
@@ -536,13 +580,13 @@ function StageFour_BackupKeys { @'
 		}
 	}
 	function Test-BitLockerBackups {
-		#Backup key to Ninja
+		# Backup key to Ninja
 		Test-IfKeySavedToNinja
 
-		#Backup key to AD, Entra, or both
+		# Backup key to AD, Entra, or both
 		Test-JoinStatus
 
-		#Backup key to network location
+		# Backup key to network location
 		Test-IfKeySavedToNetwork
 	}
 	#endregion Test if keys are saved to Ninja, Network Share, AD, Entra
@@ -555,7 +599,7 @@ Invoke-Expression $(StageFour_BackupKeys)
 
 # Check if the device has been pending reboot for over 30 days
 # Partially in case the "reboot pending" value doesn't get deleted after reboot
-if ((Search-blEncryptionDatePending) -and ((Search-blEncryptionDatePending) -lt $DateMinusThirty)) {
+if ((Search-blEncryptionDatePending) -and ($DaysSincePendingReboot -gt 30)) {
 	Write-Host "|| BitLocker has been pending reboot for over 30 days, removing registry value(s)..."
 
 	Remove-ItemProperty -Path $BitLockerRegistryKey -Name *
@@ -566,15 +610,14 @@ if ((Search-blEncryptionDatePending) -and ((Search-blEncryptionDatePending) -lt 
 }
 
 # Check for currently running processes, if it's a server, or if it's ready for BitLocker
-if ( ((Search-blEncryptionRebootStatus) -eq "PendingReboot") -and ((Search-blEncryptionDatePending) -gt $DateMinusThirty) ) {
-	Write-Host ">> BitLocker is pending reboot since $(Search-blEncryptionDatePending) to begin encryption."
-} elseif ($osVersion -like "*Server*") {
+if ($osVersion -like "*Server*") {
 	if ((Get-CimInstance -ClassName win32_computersystem | Select-Object -ExpandProperty Model) -ne "Virtual Machine") {
 		New-BitLockerRegistryKey
 		
 		function Search-BDEStatus { Get-WindowsFeature | Where-Object DisplayName -eq "BitLocker Drive Encryption" -ErrorAction SilentlyContinue }
-		function Get-BDEFeatureStatusProperty { Get-ItemProperty -Path $BitLockerRegistryKey -Name "BDEFeatureStatus" -ErrorAction SilentlyContinue }
-		function Get-BDEFeatureDatePendingProperty { Get-ItemProperty -Path $BitLockerRegistryKey -Name "BDEFeatureDatePending" -ErrorAction SilentlyContinue }
+		function Get-BDEFeatureStatusProperty { (Get-ItemProperty $BitLockerRegistryKey -ErrorAction SilentlyContinue).BDEFeatureStatus }
+		function Get-BDEFeatureDatePendingProperty { (Get-ItemProperty $BitLockerRegistryKey -ErrorAction SilentlyContinue).BDEFeatureDatePending }
+		
 		if ((Search-BDEStatus).Installed -eq $false) {
 			Write-Host "|| Installing BitLocker Drive Encryption feature..."
 
@@ -591,8 +634,11 @@ if ( ((Search-blEncryptionRebootStatus) -eq "PendingReboot") -and ((Search-blEnc
 				} else { Write-Host ">> - Failed to create registry entries." }
 			} else { Write-Host ">> - Failed to install BitLocker Drive Encryption feature." }
 		} else {
+			if (Get-BDEFeatureDatePendingProperty) { $DaysSincePendingReboot = ((New-TimeSpan -Start (Get-BDEFeatureDatePendingProperty) -End ([DateTime]::Now)).Days) }
+			else { $DaysSincePendingReboot = $null }
+
 			# if the registry values have been created and the "BDEFeatureDatePending" value is less than 30 days ago
-			if ( (Get-BDEFeatureStatusProperty) -and ( (Get-BDEFeatureDatePendingProperty) -and (([datetime](Get-BDEFeatureDatePendingProperty).BDEFeatureDatePending) -gt $DateMinusThirty) ) ) {
+			if ( (-not ((Get-WindowsFeature | Where-Object DisplayName -eq "BitLocker Drive Encryption" -ErrorAction SilentlyContinue).installed) ) -and ((Get-BDEFeatureStatusProperty) -and ($DaysSincePendingReboot -lt 30)) ) {
 				Write-Host ">> Server is pending reboot to install the ""BitLocker Drive Encryption"" role."
 			} else {
 				if ((Get-BDEFeatureStatusProperty) -or (Get-BDEFeatureDatePendingProperty)) {
@@ -601,22 +647,12 @@ if ( ((Search-blEncryptionRebootStatus) -eq "PendingReboot") -and ((Search-blEnc
 					Remove-ItemProperty -Path $BitLockerRegistryKey -Name *
 				}
 
-				if ( (Get-BitLockerVolume).VolumeStatus -contains "EncryptionInProgress" ) {
-					Write-Host "BitLocker encryption in progress."
-				} elseif ( (Get-BitLockerVolume).VolumeStatus -contains "DecryptionInProgress" ) {
-					Write-Host "BitLocker decryption in progress."
-				} else {
-					Test-BitLocker
-				}
+				Get-BitLockerStatus
 			}
 		}
 	} else { Write-Host "BitLocker not enabled on VMs." }
 } elseif ($osVersion -like "*Windows*Home*") {
 	Write-Host "BitLocker requires Windows 10/11 Pro. Upgrade and try again."
-} elseif ( (Get-BitLockerVolume).VolumeStatus -contains "EncryptionInProgress" ) {
-	Write-Host "BitLocker encryption in progress."
-} elseif ( (Get-BitLockerVolume).VolumeStatus -contains "DecryptionInProgress" ) {
-	Write-Host "BitLocker decryption in progress."
 } else {
-	Test-BitLocker
+	Get-BitLockerStatus
 }
