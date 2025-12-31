@@ -7,6 +7,8 @@
 		2025-12-30: V1.0 - Initial version
 	.FUNCTIONALITY
 		Automates the installation of the Huntress System Extension to reduce manual intervention
+	.LINK
+		https://github.com/bf-ryanalexander/Scripts/blob/main/macOS/Install-HuntressExtension.sh
 '
 function HuntressStatus {
 	sudo /Applications/Huntress.app/Contents/MacOS/Huntress extensionctl status
