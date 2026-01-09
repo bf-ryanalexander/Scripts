@@ -4,6 +4,7 @@
 	.DESCRIPTION
 		Checks to see if the device is utilizing BitLocker Drive Encryption with TPM as the Key Protector Type and saves the recovery key to the specified location
 	.NOTES
+		2026-01-09: V4.4.1 - Added check for if the specified directories exist and creating them if they don't.
 		2025-12-08: V4.4 - Updated to backup the keys during the initial run, so keys are backed up prior to encryption, suppressed output when defining $SystemDriveBitLocker
 		2025-08-04: V4.3 - Accounted for edge case where BitLocker could have just TPM for a keyprotector with no RecoveryPassword and not flag as a "bad scenario"
 							added output to the "Decryption in progress" result to show remaining percentage if the script is ran again.
@@ -60,6 +61,10 @@ function StageOne_DefineFunctions { @'
 								# Don't set a crazy high time (Eg. 24 hours) if you have multiple drives to encrypt.
 
 	# ---------------End customization options---------------------- #
+
+	# Directories
+	if (-not (Test-Path $BitLockerDirectory)) { New-Item -Type Directory $BitLockerDirectory | Out-Null }
+	if (-not (Test-Path $BitLockerLogs)) { New-Item -Type Directory $BitLockerLogs | Out-Null }
 
 	function Write-Log {
 		param( [String]$LogMsg ) ; $Log = "[$(Get-Date -Format s)] $LogMsg"
