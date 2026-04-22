@@ -2,9 +2,10 @@
 	.SYNOPSIS
 		Enables BitLocker Drive Encryption
 	.DESCRIPTION
-		Checks to see if the device is utilizing BitLocker Drive Encryption with TPM as the Key Protector Type and saves the recovery key to the specified location
+		Checks to see if the device is utilizing BitLocker Drive Encryption with TPM as the Key Protector Type and saves the recovery key to the specified locations
 	.NOTES
-		2026-01-09: V4.4.1 - Added check for if the specified directories exist and creating them if they don't.
+		2026-04-22: V4.4.2 - Added check for virtualized desktop OS (Eg. Windows 11 VM)
+		2026-01-09: V4.4.1 - Added check for if the $BitLockerDirectory and $BitLockerLogs directories exist and creating them if they don't.
 		2025-12-08: V4.4 - Updated to backup the keys during the initial run, so keys are backed up prior to encryption, suppressed output when defining $SystemDriveBitLocker
 		2025-08-04: V4.3 - Accounted for edge case where BitLocker could have just TPM for a keyprotector with no RecoveryPassword and not flag as a "bad scenario"
 							added output to the "Decryption in progress" result to show remaining percentage if the script is ran again.
@@ -72,6 +73,7 @@ function StageOne_DefineFunctions { @'
 	}
 
 	$osVersion = (Get-CimInstance win32_operatingsystem).Caption
+	$DeviceModel = Get-CimInstance -ClassName win32_computersystem | Select-Object -ExpandProperty Model
 	if (Get-Command Get-BitlockerVolume -ErrorAction SilentlyContinue) { $SystemDriveBitLocker = Get-BitlockerVolume -MountPoint $ENV:SystemDrive }
 
 	# Registry
@@ -616,7 +618,7 @@ if ((Search-blEncryptionDatePending) -and ($DaysSincePendingReboot -gt 30)) {
 
 # Check for currently running processes, if it's a server, or if it's ready for BitLocker
 if ($osVersion -like "*Server*") {
-	if ((Get-CimInstance -ClassName win32_computersystem | Select-Object -ExpandProperty Model) -ne "Virtual Machine") {
+	if ($DeviceModel -ne "Virtual Machine") {
 		New-BitLockerRegistryKey
 		
 		function Search-BDEStatus { Get-WindowsFeature | Where-Object DisplayName -eq "BitLocker Drive Encryption" -ErrorAction SilentlyContinue }
@@ -656,8 +658,6 @@ if ($osVersion -like "*Server*") {
 			}
 		}
 	} else { Write-Host "BitLocker not enabled on VMs." }
-} elseif ($osVersion -like "*Windows*Home*") {
-	Write-Host "BitLocker requires Windows 10/11 Pro. Upgrade and try again."
-} else {
-	Get-BitLockerStatus
-}
+} elseif ($DeviceModel -eq "Virtual Machine") { Write-Host "BitLocker not enabled on VMs." } # In case of virtualized desktop-class OS
+elseif ($osVersion -like "*Windows*Home*") { Write-Host "BitLocker requires Windows 10/11 Pro. Upgrade and try again." }
+else { Get-BitLockerStatus }
