@@ -4,6 +4,7 @@
 	.DESCRIPTION
 		Checks to see if the device is utilizing BitLocker Drive Encryption with TPM as the Key Protector Type and saves the recovery key to the specified locations
 	.NOTES
+		2026-04-28: V4.4.3 - Updated cleanup of Deploy-BitLocker.ps1 to remove the script, not the directory, and created the $BitLockerTaskPath Task Scheduler folder if it doesn't exist
 		2026-04-22: V4.4.2 - Added check for virtualized desktop OS (Eg. Windows 11 VM)
 		2026-01-09: V4.4.1 - Added check for if the $BitLockerDirectory and $BitLockerLogs directories exist and creating them if they don't.
 		2025-12-08: V4.4 - Updated to backup the keys during the initial run, so keys are backed up prior to encryption, suppressed output when defining $SystemDriveBitLocker
@@ -56,7 +57,7 @@ function StageOne_DefineFunctions { @'
 	$BitLockerRegistryKey = "HKLM:\Software\BrightFlow\BitLocker" # Which Registry key to save registry entries in
 	$BitLockerDirectory = "C:\temp\BrightFlow\BitLocker" # Which folder in File Explorer to save the post-reboot script
 	$BitLockerLogs = "C:\Temp\BrightFlow\logs" # Which folder in File Explorer to save the post-reboot logs
-	$BitLockerTaskPath = "\BrightFlow\" # Which folder in Task Scheduler to save the task
+	$BitLockerTaskPath = "\BrightFlow\" # Which folder in Task Scheduler to save the task. Must start and end with a "\"
 	$TimeBetweenChecks = "300"	# Number of seconds before re-checking if the decryption/encryption process has finished.
 								# Note, it will wait the full time before moving to the next drive even if the process finishes before then.
 								# Don't set a crazy high time (Eg. 24 hours) if you have multiple drives to encrypt.
@@ -66,6 +67,33 @@ function StageOne_DefineFunctions { @'
 	# Directories
 	if (-not (Test-Path $BitLockerDirectory)) { New-Item -Type Directory $BitLockerDirectory | Out-Null }
 	if (-not (Test-Path $BitLockerLogs)) { New-Item -Type Directory $BitLockerLogs | Out-Null }
+	
+	# Task Scheduler
+	$BitLockerTaskPathName = $BitLockerTaskPath -Replace ".$" # Removes the last "\" so we can create the folder
+	try {
+		$scheduleObject = New-Object -ComObject schedule.service
+		$scheduleObject.connect()
+		$scheduleObject.GetFolder("$BitLockerTaskPathName") | Out-Null
+		Throw
+	} catch {
+		if ($error[0] -like "*The system cannot find the file specified*") {
+			Write-Host "|| Creating $BitLockerTaskPathName Task Scheduler folder..."
+
+			$scheduleObject = New-Object -ComObject schedule.service
+			$scheduleObject.connect()
+			($scheduleObject.GetFolder("\")).CreateFolder($BitLockerTaskPathName) | Out-Null
+
+			try {
+				$checkSchedule = New-Object -ComObject schedule.service
+				$checkSchedule.connect()
+				$result = $checkSchedule.GetFolder("$BitLockerTaskPathName")
+				throw
+			} catch {
+				if ($null -ne $result) { Write-Host "|| - Successfully created $BitLockerTaskPathName Task Scheduler folder." }
+				else { Write-Host ">> - Failed to create $BitLockerTaskPathName Task Scheduler folder." }
+			}
+		}
+	}
 
 	function Write-Log {
 		param( [String]$LogMsg ) ; $Log = "[$(Get-Date -Format s)] $LogMsg"
@@ -95,7 +123,6 @@ function StageOne_DefineFunctions { @'
 
 	# Task and Script
 	$blTaskName = "BitLocker Post-Reboot Encryption"
-	$BitLockerTaskPath = "\BrightFlow\"
 	function Search-blInstallTask { Get-ScheduledTask -TaskPath $BitLockerTaskPath | Where-Object TaskName -eq $blTaskName -ErrorAction SilentlyContinue }
 	function Search-blDeployScript { Test-Path "$BitLockerDirectory\Deploy-BitLocker.ps1" -ErrorAction SilentlyContinue }
 	
@@ -109,12 +136,12 @@ function StageOne_DefineFunctions { @'
 			else { Write-Host ">> - Failed to remove BitLocker task." }
 		}
 
-		if (Test-Path $BitLockerDirectory) {
+		if (Search-blDeployScript) {
 			Write-Host "|| Removing BitLocker Post-Reboot script..."
 
-			Remove-Item $BitLockerDirectory -Recurse -Force -ErrorAction SilentlyContinue
+			Remove-Item "$BitLockerDirectory\Deploy-BitLocker.ps1" -Recurse -Force -ErrorAction SilentlyContinue
 
-			if (-not (Test-Path $BitLockerDirectory)) { Write-Host "|| - Successfully removed BitLocker Post-Reboot script." }
+			if (-not (Search-blDeployScript)) { Write-Host "|| - Successfully removed BitLocker Post-Reboot script." }
 			else { Write-Host ">> - Failed to remove BitLocker Post-Reboot script." }
 		}
 
