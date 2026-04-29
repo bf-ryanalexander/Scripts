@@ -1,43 +1,51 @@
-# Establish directories
-$hpiaDirectory = "C:\temp\HPIA"
-$hpiaLogs = "C:\temp\Logs\HPIA"
-if (-not(Test-Path $hpiaDirectory)) { New-Item -ItemType Directory $hpiaDirectory | Out-Null }
-if (-not(Test-Path $hpiaLogs)) { New-Item -ItemType Directory $hpiaLogs | Out-Null }
+# Check if manufacturer is HP
+$Manufacturer = Get-CimInstance -ClassName Win32_ComputerSystem | Select-Object -ExpandProperty Manufacturer
+if (($Manufacturer -eq "HP") -or ($Manufacturer -like "Hewlett*")) {
+	# Establish directories
+	$hpiaDirectory = "C:\temp\BrightFlow\HPIA"
+	$hpiaLogs = "C:\temp\BrightFlow\Logs\HPIA"
 
-if (Test-Path "$hpiaDirectory\HPImageAssistant.exe") {
-	# Run HP Image Assistant if it's already installed
-	Write-Host "|| Running HP Image Assistant..."
-	& "$hpiaDirectory\HPImageAssistant.exe" /Operation:Analyze /Category:BIOS,Drivers,Firmware /Selection:All /Action:Install /SoftpaqDownloadFolder:$hpiaDirectory /Silent /ReportFolder:$hpiaLogs
-} else {
-	# Download HP Image Assistant
-	#Retrieve newest installer
-	$hpia_WR = Invoke-WebRequest -Uri "https://ftp.ext.hp.com/pub/caps-softpaq/cmit/HPIA.html" -UseBasicParsing
-	$hpia_DownloadURL = $hpia_WR.Links | Where-Object href -Like "https://hpia.hpcloud.hp.com/downloads/hpia/*" | Select-Object -ExpandProperty href
-	if (-not($hpia_DownloadURL)) { $hpia_DownloadURL = "https://hpia.hpcloud.hp.com/downloads/hpia/hp-hpia-5.3.4.exe" } # Fallback URL
-	$hpia_InstallFileName = [System.IO.Path]::GetFileName($hpia_DownloadURL)
+	if (-not(Test-Path $hpiaDirectory)) { New-Item -ItemType Directory $hpiaDirectory | Out-Null }
+	if (-not(Test-Path $hpiaLogs)) { New-Item -ItemType Directory $hpiaLogs | Out-Null }
 
-	#Download installer
-	Write-Host "|| Downloading HPIA installer..."
-	Add-Type -AssemblyName System.Web
-	[Net.ServicePointManager]::SecurityProtocol = "Tls12"
-	$hpia_installer = "$hpiaDirectory\$hpia_InstallFileName"
-	(New-Object net.webclient).DownloadFile($hpia_DownloadURL,$hpia_installer)
+	if (Test-Path "$hpiaDirectory\HPImageAssistant.exe") {
+		# Run HP Image Assistant if it's already installed
+		Write-Host "|| Running HP Image Assistant..."
 
-	if (Test-Path $hpia_installer) {
-		Write-Host "|| - Successfully downloaded installer."
+		& "$hpiaDirectory\HPImageAssistant.exe" /Operation:Analyze /Category:BIOS,Drivers,Firmware /Selection:All /Action:Install /SoftpaqDownloadFolder:$hpiaDirectory /Silent /ReportFolder:$hpiaLogs
+	} else {
+		# Download HP Image Assistant
+		#Retrieve newest installer
+		$hpia_WR = Invoke-WebRequest -Uri "https://ftp.ext.hp.com/pub/caps-softpaq/cmit/HPIA.html" -UseBasicParsing
+		$hpia_DownloadURL = $hpia_WR.Links | Where-Object href -Like "https://hpia.hpcloud.hp.com/downloads/hpia/*" | Select-Object -ExpandProperty href
+		if (-not($hpia_DownloadURL)) { $hpia_DownloadURL = "https://hpia.hpcloud.hp.com/downloads/hpia/hp-hpia-5.3.4.exe" } # Fallback URL
+		$hpia_InstallFileName = [System.IO.Path]::GetFileName($hpia_DownloadURL)
 
-		# Install HP Image Assistant
-		Write-Host "|| Installing HPIA..."
-		& $hpia_installer /s /e /f $hpiaDirectory
+		#Download installer
+		Write-Host "|| Downloading HPIA installer..."
 
-		Start-Sleep -Seconds 5
+		Add-Type -AssemblyName System.Web
+		[Net.ServicePointManager]::SecurityProtocol = "Tls12"
+		$hpia_installer = "$hpiaDirectory\$hpia_InstallFileName"
+		(New-Object net.webclient).DownloadFile($hpia_DownloadURL,$hpia_installer)
 
-		if (Test-Path "$hpiaDirectory\HPImageAssistant.exe") {
-			Write-Host "|| - Successfully installed HPIA."
+		if (Test-Path $hpia_installer) {
+			Write-Host "|| - Successfully downloaded installer."
 
-			# Run HP Image Assistant
-			Write-Host "|| Running HP Image Assistant..."
-			& "$hpiaDirectory\HPImageAssistant.exe" /Operation:Analyze /Category:BIOS,Drivers,Firmware /Selection:All /Action:Install /SoftpaqDownloadFolder:$hpiaDirectory /Silent /ReportFolder:$hpiaLogs
-		} else { Write-Host ">> - Failed to install HPIA." }
-	} else { Write-Host ">> - Failed to download installer." }
-}
+			# Install HP Image Assistant
+			Write-Host "|| Installing HPIA..."
+
+			& $hpia_installer /s /e /f $hpiaDirectory
+			Start-Sleep -Seconds 5
+
+			if (Test-Path "$hpiaDirectory\HPImageAssistant.exe") {
+				Write-Host "|| - Successfully installed HPIA."
+
+				# Run HP Image Assistant
+				Write-Host "|| Running HP Image Assistant..."
+				
+				& "$hpiaDirectory\HPImageAssistant.exe" /Operation:Analyze /Category:BIOS,Drivers,Firmware /Selection:All /Action:Install /SoftpaqDownloadFolder:$hpiaDirectory /Silent /ReportFolder:$hpiaLogs
+			} else { Write-Host ">> - Failed to install HPIA." }
+		} else { Write-Host ">> - Failed to download installer." }
+	}
+} else { Write-Host ">> HP Image Assistant not compatible with this system." }
