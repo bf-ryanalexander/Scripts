@@ -4,6 +4,7 @@
 	.DESCRIPTION
 		Checks to see if the device is utilizing BitLocker Drive Encryption with TPM as the Key Protector Type and saves the recovery key to the specified locations
 	.NOTES
+		2026-07-27: V4.5 - Updated Search-KeyInNinja function to not just check that the backup exists but also contains all BitLocker keys from the device.
 		2026-04-28: V4.4.3 - Updated cleanup of Deploy-BitLocker.ps1 to remove the script, not the directory, and created the $BitLockerTaskPath Task Scheduler folder if it doesn't exist
 		2026-04-22: V4.4.2 - Added check for virtualized desktop OS (Eg. Windows 11 VM)
 		2026-01-09: V4.4.1 - Added check for if the $BitLockerDirectory and $BitLockerLogs directories exist and creating them if they don't.
@@ -48,6 +49,7 @@
 			bitlockerSavedToEntra - Checkbox - Device
 			bitlockerSavedToNetwork - Checkbox - Device
 	.NOTES
+		TODO: Verify data backed up to Ninja, update if it changed
 		TODO: Network path doesn't work with non-domain joined saving to domain UNC; mount path, save, dismount?
 #>
 
@@ -169,6 +171,7 @@ function StageOne_DefineFunctions { @'
 		( (($SystemDriveBitLocker).VolumeStatus -eq "FullyEncrypted") -and (($SystemDriveBitLocker).ProtectionStatus -eq "Off") ) -or #Bad Scenario #3: Drive is encrypted but protection is off
 		( ($SystemDriveBitLocker) | Where-Object {($_.EncryptionMethod -ne "Aes256") -and ($_.EncryptionMethod -ne "none")} ) -or #Bad Scenario #4: Drive is not encrypted with AES256 (typically AES-128 instead)
 		( (($SystemDriveBitLocker).VolumeStatus -eq "FullyDecrypted") -and (-not ([string]::IsNullOrWhitespace(($SystemDriveBitLocker).KeyProtector))) ) #Bad Scenario #5: Drive is decrypted but still has a KeyProtector listed
+		 # TODO \\ add #Bad Scenario #6: Non-system drive AutoUnlockEnabled is True, System Drive AutoUnlockKeyStored is False
 	}
 	function Test-NonSystemDrives {
 		if ([string]::IsNullOrWhitespace($NonSystemDrives)) { return $true } else {
@@ -391,11 +394,15 @@ function StageThree_TestBitLocker { @'
 					Start-Sleep $TimeBetweenChecks
 				}
 
-				# Old recovery passwords are removed when drives are fully decrypted and BitLocker disabled, so best to remove them to avoid confusion
-				if (Ninja-Property-Get bitlockerKeys) { Ninja-Property-Set bitlockerKeys $null }
+				if ((Get-BitLockerVolume -MountPoint $ENV:SystemDrive).VolumeStatus -eq "FullyDecrypted") {
+					Write-Host "|| - Successfully disabled BitLocker."
 
-				# Normal encryption process
-				Enable-BitLockerOnSystemDrive
+					# Old recovery passwords are removed when drives are fully decrypted and BitLocker disabled, so best to remove them to avoid confusion
+					if (Ninja-Property-Get bitlockerKeys) { Ninja-Property-Set bitlockerKeys $null }
+
+					# Normal encryption process
+					Enable-BitLockerOnSystemDrive
+				} else { Write-Host ">> - Failed to disable BitLocker" }
 			}
 		} else {
 			# Normal encryption process
@@ -407,15 +414,67 @@ function StageFour_BackupKeys { @'
 	#region Test if keys are saved to Ninja, Network Share, AD, Entra
 	function Test-IfKeySavedToNinja {
 		function Search-KeyInNinja {
-			if (([string]::IsNullOrWhitespace((Ninja-Property-Get bitlockerKeys)))) { return $false }
+			if (([string]::IsNullOrWhitespace((Get-NinjaProperty bitlockerKeys)))) { return $false }
 			else {
-				$BitLockerDrives | ForEach-Object {
-					$DriveData = ([regex]::match((Ninja-Property-Get bitlockerKeys), "(?s)(Mount Point: $($_.MountPoint).*?)(?:Recovery Password:[^:\r\n]*$|KeyFileName.*.BEK)"))
-					if (($DriveData -like "*Mount Point: $($_.MountPoint)*") -and (($DriveData -like "*Recovery Password:*") -or ($DriveData -like "*Drive not encrypted.*"))) { return $true } else { return $false }
+				$BackedUpKeys = Get-NinjaProperty bitlockerKeys
+				$BackupDrivesToCheck = $BackedUpKeys | Select-String "Mount Point:" | ForEach-Object { $_ -replace '\s+' -replace 'MountPoint:' }
+				$BackedUpKeys_Array = [System.Collections.Generic.List[object]]::New()
+
+				foreach ($drive in $BackupDrivesToCheck) {
+					$SearchRegex = ([regex]::match($BackedUpKeys, "(?s)(Mount Point: $drive.*?)(?:(?!Mount Point:).)*")).Value -split "  "
+
+					$KeyProtectorID = (([regex]::match($SearchRegex, "(?s)(Key Protector ID:.*?)(?:(?!Key Protector Type:).)*")).Value -split ": ")[1]
+					$KeyProtectorType = (([regex]::match($SearchRegex, "(?s)(Key Protector Type:.*?)(?:(?!Recovery Password:).)*")).Value -split ": ")[1]
+					$RecoveryPassword = ([regex]::match($SearchRegex,"(?s)(Recovery Password:.*?)(?:[0-9]{6}-[0-9]{6}-[0-9]{6}-[0-9]{6}-[0-9]{6}-[0-9]{6}-[0-9]{6}-[0-9]{6})")).Value -replace "Recovery Password: "
+					$AutoUnlockProtector = (([regex]::match($SearchRegex, "(?s)(Auto Unlock Protector:.*?)(?:(?!KeyFileName:).)*")).Value -split ": ")[1]
+					$KeyFileName = ((([regex]::match(($SearchRegex), "KeyFileName:.*")).Value) -split ": ")[1]
+
+					$pObject = New-Object PSObject
+					$pObject | Add-Member -type NoteProperty -Name 'MountPoint' -Value $drive
+					$pObject | Add-Member -type NoteProperty -Name 'KeyProtectorID' -Value $KeyProtectorID
+					$pObject | Add-Member -type NoteProperty -Name 'KeyProtectorType' -Value $KeyProtectorType
+					$pObject | Add-Member -type NoteProperty -Name 'RecoveryPassword' -Value $RecoveryPassword
+					$pObject | Add-Member -type NoteProperty -Name 'AutoUnlockProtector' -Value $AutoUnlockProtector
+					$pObject | Add-Member -type NoteProperty -Name 'KeyFileName' -Value $KeyFileName
+					
+					$BackedUpKeys_Array.Add($pObject)
 				}
+				
+				$BackupChecks = [System.Collections.Generic.List[object]]::New()
+				function Add-Result {
+					$resultObject = New-Object PSObject
+					$resultObject | Add-Member -type NoteProperty -Name 'Drive' -Value $drive.MountPoint
+					$resultObject | Add-Member -type NoteProperty -Name 'Result' -Value $Result
+					$BackupChecks.Add($resultObject)
+				}
+
+				foreach ($drive in $BitLockerDrives) {
+					if ($drive.MountPoint -eq $env:SystemDrive) {
+						if (
+							($drive.MountPoint -in $BackedUpKeys_Array.MountPoint) -and
+							(($drive.KeyProtector.KeyProtectorId -join " ") -in ($BackedUpKeys_Array.KeyProtectorID.trim())) -and
+							(($drive.KeyProtector.KeyProtectorType -join " ") -in ($BackedUpKeys_Array.KeyProtectorType.trim())) -and
+							(($drive.KeyProtector.RecoveryPassword -join " ").trim() -in ($BackedUpKeys_Array.RecoveryPassword.trim()))
+						) { $Result = "Success" ; Add-Result }
+						else { $Result = "Failed" ; Add-Result }
+					} else {
+						if (
+							($drive.MountPoint -in $BackedUpKeys_Array.MountPoint) -and
+							(($drive.KeyProtector.KeyProtectorId -join " ") -in ($BackedUpKeys_Array.KeyProtectorID.trim())) -and
+							(($drive.KeyProtector.KeyProtectorType -join " ") -in ($BackedUpKeys_Array.KeyProtectorType.trim())) -and
+							(($drive.KeyProtector.RecoveryPassword -join " ").trim() -in ($BackedUpKeys_Array.RecoveryPassword.trim())) -and
+							(($drive.KeyProtector.AutoUnlockProtector -join " ").trim() -eq "True") -and #TODO \\ Verify False is printed; trim gets rid of the blank from the System Drive
+							(($drive.KeyProtector.KeyFileName -join " ").trim() -in ($BackedUpKeys_Array.KeyFileName))
+						) { $Result = "Success" ; Add-Result }
+						else { $Result = "Failed" ; Add-Result }
+					}
+				}
+
+				if ($BackupChecks.Result -notcontains "Failed") { return $true } else { return $false }
 			}
 		}
-		if ((Search-KeyInNinja) -contains $false) {
+
+		if (-not (Search-KeyInNinja)) {
 			Write-Host "|| Saving BitLocker Key(s) to Ninja..."
 
 			$Keys = ([string]$Keys = (Get-BitLockerVolume | Where-Object {($_.MountPoint -eq $ENV:SystemDrive) -or ($_.MountPoint -in $NonSystemDrives)}) | ForEach-Object {
@@ -432,7 +491,7 @@ function StageFour_BackupKeys { @'
 				"`n`n"
 			}).Substring(0, [System.Math]::Min(10000, $Keys.Length))
 
-			Ninja-Property-Set bitlockerKeys $Keys
+			Set-NinjaProperty bitlockerKeys $Keys
 
 			if (Search-KeyInNinja) { Write-Host "|| - Successfully saved BitLocker Key to Ninja." }
 			else { Write-Host ">> - Failed to save BitLocker Key to Ninja." }
